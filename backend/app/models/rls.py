@@ -1,0 +1,81 @@
+"""
+Row-Level Security Models: Store Access, Region Access, Column Restrictions
+"""
+from datetime import datetime
+from sqlalchemy import (
+    Column, Integer, String, Boolean, DateTime, ForeignKey, UniqueConstraint
+)
+from sqlalchemy.orm import relationship
+from app.database.session import Base
+
+
+class Store(Base):
+    __tablename__ = "rls_stores"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    store_code = Column(String(20), nullable=False, unique=True, index=True)
+    store_name = Column(String(200), nullable=False)
+    region = Column(String(100), index=True)
+    hub = Column(String(100))
+    division = Column(String(100), index=True)
+    business_unit = Column(String(100))
+    store_grade = Column(String(10))
+    city = Column(String(100))
+    state = Column(String(100))
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class UserStoreAccess(Base):
+    __tablename__ = "rls_user_store_access"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("rbac_users.id"), nullable=False)
+    store_code = Column(String(20), nullable=False, index=True)
+    access_level = Column(String(50), default="READ")
+    granted_at = Column(DateTime, default=datetime.utcnow)
+    granted_by = Column(String(100))
+    is_active = Column(Boolean, default=True)
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "store_code", name="uq_user_store"),
+    )
+
+    user = relationship("User", back_populates="store_access")
+
+
+class UserRegionAccess(Base):
+    __tablename__ = "rls_user_region_access"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("rbac_users.id"), nullable=False)
+    region = Column(String(100))
+    hub = Column(String(100))
+    division = Column(String(100))
+    business_unit = Column(String(100))
+    access_level = Column(String(50), default="READ")
+    granted_at = Column(DateTime, default=datetime.utcnow)
+    granted_by = Column(String(100))
+    is_active = Column(Boolean, default=True)
+
+    user = relationship("User", back_populates="region_access")
+
+
+class ColumnRestriction(Base):
+    __tablename__ = "rls_column_restrictions"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    table_name = Column(String(200), nullable=False)
+    column_name = Column(String(200), nullable=False)
+    role_id = Column(Integer, ForeignKey("rbac_roles.id"), nullable=False)
+    is_visible = Column(Boolean, default=True)
+    is_masked = Column(Boolean, default=False)
+    mask_pattern = Column(String(100))
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("table_name", "column_name", "role_id", name="uq_col_restriction"),
+    )
+
+    role = relationship("Role", back_populates="column_restrictions")
