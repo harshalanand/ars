@@ -233,3 +233,74 @@ DRAFT → (run) → IN_PROGRESS → (complete) → DRAFT
 - Total qty limit enforcement
 - Manual override with audit trail
 - RLS enforcement on allocation details
+
+---
+
+## Phase 4 – Frontend (React + Vite + Tailwind + AG Grid)
+
+### Tech Stack
+| Layer | Technology |
+|-------|-----------|
+| Framework | React 18 + Vite 5 |
+| Styling | Tailwind CSS 3.4 |
+| Data Grid | AG Grid Enterprise 32 |
+| State | Zustand 4.5 |
+| Charts | Recharts 2.12 |
+| HTTP | Axios with JWT interceptors |
+| Icons | Lucide React |
+| Notifications | React Hot Toast |
+| Routing | React Router DOM 6 |
+
+### Frontend Structure
+```
+frontend/
+├── src/
+│   ├── components/
+│   │   ├── layout/          # Layout, Sidebar, Header
+│   │   └── tables/          # CreateTableModal
+│   ├── pages/
+│   │   ├── LoginPage.jsx        # JWT auth with gradient UI
+│   │   ├── DashboardPage.jsx    # Stats cards + charts + recent allocs
+│   │   ├── TablesPage.jsx       # Table cards, search, create modal
+│   │   ├── TableDataPage.jsx    # AG Grid with inline editing + pagination
+│   │   ├── UploadPage.jsx       # Drag-drop, preview, progress bar, results
+│   │   ├── AllocationsPage.jsx  # Allocation list with status filters
+│   │   ├── NewAllocationPage.jsx # Allocation config form
+│   │   ├── AllocationDetailPage.jsx # Summary, charts, AG Grid details
+│   │   ├── UsersPage.jsx        # User CRUD with role assignment
+│   │   ├── RolesPage.jsx        # Role list + permission checkboxes
+│   │   ├── AuditPage.jsx        # Audit log with filters + AG Grid
+│   │   └── RLSPage.jsx          # Store/region access per user
+│   ├── services/api.js      # Axios + JWT refresh + all API methods
+│   ├── store/authStore.js   # Zustand auth store
+│   ├── styles/globals.css   # Tailwind + AG Grid theme
+│   ├── App.jsx              # Routes with permission guards
+│   └── main.jsx             # Entry point
+├── vite.config.js           # Proxy /api → backend:8000
+├── tailwind.config.js
+└── package.json
+```
+
+### Pages (21 files, ~3,500 lines)
+| Page | Features |
+|------|----------|
+| **Login** | Gradient dark theme, JWT auth, auto-redirect |
+| **Dashboard** | 3 stat cards, bar chart, recent allocations |
+| **Tables** | Card grid, search, create modal, soft-delete |
+| **Table Data** | AG Grid inline editing, floating filters, pagination, CSV export |
+| **Upload** | 4-step wizard, drag-drop, preview, progress bar, result summary |
+| **Allocations** | Status-filtered list, pagination, badges |
+| **New Allocation** | Multi-section form: type/basis/warehouse, grade ratios, constraints |
+| **Allocation Detail** | Stats, pie/bar charts, AG Grid, approve/execute/cancel |
+| **Users** | CRUD with role toggle buttons, unlock |
+| **Roles** | Split panel: role list + grouped permission checkboxes |
+| **Audit** | 6-filter bar, AG Grid with color-coded operations |
+| **RLS** | User list + store/region tag management |
+
+### Quick Start (Frontend)
+```bash
+cd frontend
+npm install
+npm run dev          # :3000, proxies /api → :8000
+npm run build        # Production → dist/
+```
