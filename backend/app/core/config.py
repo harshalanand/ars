@@ -17,9 +17,9 @@ class Settings(BaseSettings):
     HOST: str = "0.0.0.0"
     PORT: int = 8000
 
-    # Database
+    # System Database (RBAC, RLS, Audit, Table Metadata)
     DB_SERVER: str = "HOPC560"
-    DB_NAME: str = "Rep_data"
+    DB_NAME: str = "Claude"
     DB_USERNAME: str = "sa"
     DB_PASSWORD: str = "vrl@55555"
     DB_DRIVER: str = "ODBC Driver 18 for SQL Server"
@@ -28,6 +28,9 @@ class Settings(BaseSettings):
     DB_MAX_OVERFLOW: int = 30
     DB_POOL_TIMEOUT: int = 30
     DB_POOL_RECYCLE: int = 1800
+
+    # Working Database (Business data, dynamic tables, allocations)
+    DATA_DB_NAME: str = "Rep_data"
 
     # JWT
     JWT_SECRET_KEY: str = "your-super-secret-key-change-in-production-min-32-chars"
@@ -57,13 +60,24 @@ class Settings(BaseSettings):
 
     @property
     def DATABASE_URL(self) -> str:
-        """Build SQLAlchemy connection string for SQL Server with ODBC 18."""
+        """Build SQLAlchemy connection string for System DB (Claude)."""
         from urllib.parse import quote_plus
         password = quote_plus(self.DB_PASSWORD)
         driver = quote_plus(self.DB_DRIVER)
         return (
             f"mssql+pyodbc://{self.DB_USERNAME}:{password}@{self.DB_SERVER}/"
             f"{self.DB_NAME}?driver={driver}&TrustServerCertificate={self.DB_TRUST_CERT}"
+        )
+
+    @property
+    def DATA_DATABASE_URL(self) -> str:
+        """Build SQLAlchemy connection string for Working DB (Rep_data)."""
+        from urllib.parse import quote_plus
+        password = quote_plus(self.DB_PASSWORD)
+        driver = quote_plus(self.DB_DRIVER)
+        return (
+            f"mssql+pyodbc://{self.DB_USERNAME}:{password}@{self.DB_SERVER}/"
+            f"{self.DATA_DB_NAME}?driver={driver}&TrustServerCertificate={self.DB_TRUST_CERT}"
         )
 
     @property

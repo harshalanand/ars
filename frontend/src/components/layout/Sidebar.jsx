@@ -1,20 +1,41 @@
 import { NavLink } from 'react-router-dom'
-import { LayoutDashboard, Table2, Upload, PackageCheck, Users, Shield, Eye, ScrollText, ChevronLeft, ChevronRight, Box } from 'lucide-react'
+import { 
+  LayoutDashboard, Table2, Upload, PackageCheck, Users, Shield, Eye, ScrollText, 
+  ChevronLeft, ChevronRight, Box, ChevronDown, FolderOpen, FilePlus, FileUp, 
+  FileDown, Edit3, Settings, Database, Columns, BarChart3, Cpu, Cog, Activity
+} from 'lucide-react'
 import useAuthStore from '@/store/authStore'
 import clsx from 'clsx'
+import { useState, useRef, useEffect } from 'react'
 
 const navItems = [
   { label: 'Dashboard', path: '/', icon: LayoutDashboard, end: true },
-  { label: 'Tables', path: '/tables', icon: Table2 },
-  { label: 'Upload', path: '/upload', icon: Upload },
   { label: 'Allocations', path: '/allocations', icon: PackageCheck },
 ]
 
-const adminItems = [
-  { label: 'Users', path: '/admin/users', icon: Users, permission: 'ADMIN_USERS_READ' },
-  { label: 'Roles', path: '/admin/roles', icon: Shield, permission: 'ADMIN_ROLES_MANAGE' },
-  { label: 'Row-Level Security', path: '/admin/rls', icon: Eye, permission: 'ADMIN_RLS_MANAGE' },
-  { label: 'Audit Log', path: '/admin/audit', icon: ScrollText, permission: 'ADMIN_AUDIT_READ' },
+// Data Management submenu
+const dataManagementItems = [
+  { label: 'All Tables', path: '/tables', icon: Table2 },
+  { label: 'Create Table', path: '/tables/create', icon: FilePlus, permission: 'TABLE_CREATE' },
+  { label: 'Upload Data', path: '/upload', icon: FileUp },
+  { label: 'Export Data', path: '/export', icon: FileDown },
+  { label: 'Jobs Dashboard', path: '/jobs', icon: Activity },
+  { label: 'Data Editor', path: '/editor', icon: Edit3 },
+]
+
+// Data Preparation submenu
+const dataPreparationItems = [
+  { label: 'MSA Stock Calculation', path: '/msa', icon: BarChart3 },
+]
+
+// Settings submenu (admin features)
+const settingsItems = [
+  { label: 'App Settings', path: '/settings', icon: Cog, permission: 'ADMIN_SETTINGS' },
+  { label: 'Table Management', path: '/settings/tables', icon: Columns, permission: 'TABLE_ALTER' },
+  { label: 'Users', path: '/settings/users', icon: Users, permission: 'ADMIN_USERS_READ' },
+  { label: 'Roles', path: '/settings/roles', icon: Shield, permission: 'ADMIN_ROLES_MANAGE' },
+  { label: 'Row-Level Security', path: '/settings/rls', icon: Eye, permission: 'ADMIN_RLS_MANAGE' },
+  { label: 'Audit Log', path: '/settings/audit', icon: ScrollText, permission: 'ADMIN_AUDIT_READ' },
 ]
 
 function SideLink({ item, collapsed }) {
@@ -22,22 +43,127 @@ function SideLink({ item, collapsed }) {
     <NavLink
       to={item.path}
       end={item.end}
+      title={collapsed ? item.label : undefined}
       className={({ isActive }) => clsx(
-        'flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all duration-150',
+        'flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-[12px] font-medium transition-all duration-150',
+        collapsed && 'justify-center',
         isActive
-          ? 'bg-primary-600 text-white shadow-md shadow-primary-600/25'
+          ? 'bg-gradient-to-r from-primary-600 to-primary-500 text-white shadow-lg shadow-primary-600/30'
           : 'text-sidebar-text hover:bg-sidebar-hover hover:text-white'
       )}
     >
-      <item.icon size={20} />
+      <item.icon size={18} className={!collapsed && 'shrink-0'} />
       {!collapsed && <span>{item.label}</span>}
     </NavLink>
   )
 }
 
+function SubMenu({ title, icon: Icon, items, collapsed, hasPermission, defaultOpen = true }) {
+  const [open, setOpen] = useState(defaultOpen)
+  const [showPopup, setShowPopup] = useState(false)
+  const popupRef = useRef()
+  const buttonRef = useRef()
+  
+  const visibleItems = items.filter(i => !i.permission || hasPermission(i.permission))
+  
+  if (visibleItems.length === 0) return null
+
+  // Collapsed mode: show popup on hover
+  if (collapsed) {
+    return (
+      <div 
+        className="relative group"
+        onMouseEnter={() => setShowPopup(true)}
+        onMouseLeave={() => setShowPopup(false)}
+      >
+        <button
+          ref={buttonRef}
+          className={clsx(
+            'flex items-center justify-center w-full px-2.5 py-2 rounded-lg text-[12px] font-medium transition-all duration-150',
+            'text-sidebar-text hover:bg-sidebar-hover hover:text-white',
+            showPopup && 'bg-sidebar-hover text-white'
+          )}
+          title={title}
+        >
+          <Icon size={18} />
+        </button>
+        
+        {/* Popup menu - using fixed positioning to escape overflow */}
+        {showPopup && (
+          <div 
+            ref={popupRef}
+            className="fixed ml-2 w-48 bg-gray-900 border border-gray-700 rounded-lg shadow-2xl py-1"
+            style={{
+              left: buttonRef.current ? buttonRef.current.getBoundingClientRect().right + 8 : 64,
+              top: buttonRef.current ? buttonRef.current.getBoundingClientRect().top : 0,
+              zIndex: 9999,
+            }}
+          >
+            <div className="px-3 py-1.5 text-[10px] font-semibold text-gray-400 uppercase tracking-wide border-b border-gray-700">
+              {title}
+            </div>
+            {visibleItems.map(item => (
+              <NavLink
+                key={item.path}
+                to={item.path}
+                className={({ isActive }) => clsx(
+                  'flex items-center gap-2.5 px-3 py-2 text-[12px] transition-all duration-150',
+                  isActive
+                    ? 'bg-primary-600/30 text-primary-400 font-medium'
+                    : 'text-gray-300 hover:bg-gray-800 hover:text-white'
+                )}
+              >
+                <item.icon size={14} className="shrink-0" />
+                <span>{item.label}</span>
+              </NavLink>
+            ))}
+          </div>
+        )}
+      </div>
+    )
+  }
+
+  // Expanded mode
+  return (
+    <div className="space-y-0.5">
+      <button
+        onClick={() => setOpen(o => !o)}
+        className={clsx(
+          'flex items-center justify-between w-full px-2.5 py-2 rounded-lg text-[12px] font-medium transition-all duration-150',
+          'text-sidebar-text hover:bg-sidebar-hover hover:text-white'
+        )}
+      >
+        <div className="flex items-center gap-2.5">
+          <Icon size={18} className="shrink-0" />
+          <span>{title}</span>
+        </div>
+        <ChevronDown size={14} className={clsx('transition-transform shrink-0', open && 'rotate-180')} />
+      </button>
+      {open && (
+        <div className="ml-3 space-y-0.5 border-l-2 border-gray-700/50 pl-2.5">
+          {visibleItems.map(item => (
+            <NavLink
+              key={item.path}
+              to={item.path}
+              className={({ isActive }) => clsx(
+                'flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-[11px] transition-all duration-150',
+                isActive
+                  ? 'bg-primary-600/20 text-primary-400 font-medium border-l-2 border-primary-400 -ml-[2px] pl-[12px]'
+                  : 'text-sidebar-text/80 hover:bg-sidebar-hover hover:text-white'
+              )}
+            >
+              <item.icon size={14} className="shrink-0" />
+              <span>{item.label}</span>
+            </NavLink>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 export default function Sidebar({ collapsed, onToggle }) {
   const { hasPermission } = useAuthStore()
-  const visibleAdmin = adminItems.filter(i => hasPermission(i.permission))
 
   return (
     <aside className={clsx(
@@ -45,23 +171,44 @@ export default function Sidebar({ collapsed, onToggle }) {
       collapsed ? 'w-16' : 'w-60'
     )}>
       {/* Logo */}
-      <div className="flex items-center gap-3 px-4 py-5 border-b border-gray-800">
-        <div className="w-8 h-8 rounded-lg bg-primary-600 flex items-center justify-center">
-          <Box size={18} className="text-white" />
+      <div className="flex items-center gap-2.5 px-3 py-4 border-b border-gray-800">
+        <div className="w-7 h-7 rounded-lg bg-primary-600 flex items-center justify-center">
+          <Box size={16} className="text-white" />
         </div>
-        {!collapsed && <span className="text-white font-bold text-lg tracking-tight">ARS</span>}
+        {!collapsed && <span className="text-white font-bold text-base tracking-tight">ARS</span>}
       </div>
 
       {/* Nav */}
-      <nav className="flex-1 px-3 py-4 space-y-1 overflow-y-auto">
+      <nav className="flex-1 px-2 py-3 space-y-0.5 overflow-y-auto">
         {navItems.map(item => <SideLink key={item.path} item={item} collapsed={collapsed} />)}
-        {visibleAdmin.length > 0 && (
-          <>
-            {!collapsed && <div className="text-xs text-gray-500 uppercase tracking-wider px-3 pt-6 pb-2">Admin</div>}
-            {collapsed && <div className="border-t border-gray-700 my-3" />}
-            {visibleAdmin.map(item => <SideLink key={item.path} item={item} collapsed={collapsed} />)}
-          </>
-        )}
+        
+        {/* Data Management submenu */}
+        <SubMenu 
+          title="Data Management" 
+          icon={Database} 
+          items={dataManagementItems} 
+          collapsed={collapsed}
+          hasPermission={hasPermission}
+        />
+
+        {/* Data Preparation submenu */}
+        <SubMenu 
+          title="Data Preparation" 
+          icon={Cpu} 
+          items={dataPreparationItems} 
+          collapsed={collapsed}
+          hasPermission={hasPermission}
+        />
+
+        {/* Settings submenu */}
+        <SubMenu 
+          title="Settings" 
+          icon={Settings} 
+          items={settingsItems} 
+          collapsed={collapsed}
+          hasPermission={hasPermission}
+          defaultOpen={false}
+        />
       </nav>
 
       {/* Collapse toggle */}

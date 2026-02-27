@@ -58,9 +58,9 @@ class RolePermission(Base):
         UniqueConstraint("role_id", "permission_id", name="uq_role_permission"),
     )
 
-    # Relationships
+    # Relationships - use selectin for eager loading
     role = relationship("Role", back_populates="role_permissions")
-    permission = relationship("Permission", back_populates="role_permissions")
+    permission = relationship("Permission", back_populates="role_permissions", lazy="selectin")
 
 
 class User(Base):
@@ -68,7 +68,8 @@ class User(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     username = Column(String(100), nullable=False, unique=True, index=True)
-    email = Column(String(200), nullable=False, unique=True, index=True)
+    email = Column(String(200), index=True)  # Not unique
+    mobile_no = Column(String(15), nullable=False, unique=True, index=True)
     password_hash = Column(String(500), nullable=False)
     full_name = Column(String(200), nullable=False)
     employee_code = Column(String(50))
@@ -120,6 +121,6 @@ class UserRole(Base):
         UniqueConstraint("user_id", "role_id", name="uq_user_role"),
     )
 
-    # Relationships
+    # Relationships - use selectin for eager loading
     user = relationship("User", back_populates="user_roles")
-    role = relationship("Role", back_populates="user_roles")
+    role = relationship("Role", back_populates="user_roles", lazy="selectin")

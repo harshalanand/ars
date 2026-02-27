@@ -101,11 +101,18 @@ class FileUploadService:
         if column_mapping:
             df = df.rename(columns=column_mapping)
 
-        # Clean column names
-        df.columns = [str(c).strip() for c in df.columns]
+        # Clean and normalize column names (uppercase, replace special chars with underscores)
+        import re
+        def normalize_col(c):
+            normalized = re.sub(r'[^A-Z0-9_]', '_', str(c).upper().strip())
+            normalized = re.sub(r'_+', '_', normalized)  # Collapse multiple underscores
+            return normalized.strip('_')  # Remove leading/trailing underscores
+        
+        df.columns = [normalize_col(c) for c in df.columns]
 
-        # Validate PKs exist
-        missing_pks = [pk for pk in primary_key_columns if pk not in df.columns]
+        # Validate PKs exist (case-insensitive)
+        df_cols_upper = {c.upper() for c in df.columns}
+        missing_pks = [pk for pk in primary_key_columns if pk.upper() not in df_cols_upper]
         if missing_pks:
             raise ValueError(
                 f"Primary key columns not found in file: {missing_pks}. "
@@ -123,6 +130,7 @@ class FileUploadService:
         df = self._clean_dataframe(df)
 
         # Execute upsert
+
         result = self.upsert_engine.upsert(
             table_name=table_name,
             df=df,
@@ -131,7 +139,39 @@ class FileUploadService:
             source="UPLOAD",
             ip_address=ip_address,
             chunk_size=settings.UPLOAD_CHUNK_SIZE,
+            enable_row_audit=True,  # Always enable row-level audit for batch uploads
+            collect_sample_changes=False,  # Disable sample-only, log all changes
         )
+
+        # Log DataChangeLog for batch details (insert/update)
+        from app.services.audit_service import log_bulk_changes
+        batch_id = result.get("batch_id")
+        all_row_changes = result.get("all_row_changes", [])
+        row_changes = []
+        for sc in all_row_changes:
+            action_type = sc.get("action_type")
+            pk = sc.get("record_primary_key")
+            changed_columns = sc.get("changed_columns", {})
+            changes = {}
+            for col, diff in changed_columns.items():
+                changes[col] = {
+                    "old": diff.get("old"),
+                    "new": diff.get("new"),
+                    "type": diff.get("type", "")
+                }
+            row_changes.append({
+                "action_type": action_type,
+                "record_key": pk,
+                "changes": changes if changes else None,
+            })
+        if row_changes:
+            log_bulk_changes(
+                table_name=table_name,
+                batch_id=batch_id,
+                row_changes=row_changes,
+                changed_by=changed_by,
+                source="UPLOAD",
+            )
 
         # Add upload-specific info
         result["file_name"] = file_name
@@ -146,6 +186,196 @@ class FileUploadService:
             f"[{batch_id}] Upload complete: {file_name} → {table_name} | "
             f"{result['inserted']} inserted, {result['updated']} updated, "
             f"{result['errors']} errors | {duration_ms}ms"
+        )
+
+        return result
+
+    async def process_delete(
+        self,
+        file_content: bytes,
+        file_name: str,
+        table_name: str,
+        primary_key_columns: List[str],
+        changed_by: str,
+        ip_address: Optional[str] = None,
+        skip_rows: int = 0,
+        sheet_name: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Process an uploaded file and delete matching rows from the target table.
+
+        Args:
+            file_content: Raw file bytes
+            file_name: Original filename
+            table_name: Target SQL table
+            primary_key_columns: PK columns to match for deletion
+            changed_by: Username
+            ip_address: Client IP
+            skip_rows: Number of rows to skip from top
+            sheet_name: Excel sheet name (None = first sheet)
+
+        Returns:
+            Delete result with stats
+        """
+        start_time = time.time()
+        batch_id = f"DEL_{uuid.uuid4().hex[:10]}"
+
+        # Validate extension
+        ext = os.path.splitext(file_name)[1].lower()
+        if ext not in self.ALLOWED_EXTENSIONS:
+            raise ValueError(f"Unsupported file type: {ext}. Allowed: {self.ALLOWED_EXTENSIONS}")
+
+        # Validate file size
+        if len(file_content) > self.MAX_FILE_SIZE:
+            raise ValueError(
+                f"File too large: {len(file_content) / (1024*1024):.1f}MB. "
+                f"Max: {settings.MAX_UPLOAD_SIZE_MB}MB"
+            )
+
+        logger.info(f"[{batch_id}] Processing delete: {file_name} ({len(file_content)} bytes) → {table_name}")
+
+        # Save a copy for audit trail
+        saved_path = os.path.join(UPLOAD_DIR, f"{batch_id}_{file_name}")
+        with open(saved_path, "wb") as f:
+            f.write(file_content)
+
+        # Read file into DataFrame
+        try:
+            df = self._read_file(file_content, ext, skip_rows, sheet_name)
+        except Exception as e:
+            raise ValueError(f"Failed to read file: {e}")
+
+        if df.empty:
+            raise ValueError("File contains no data")
+
+        logger.info(f"[{batch_id}] Read {len(df)} rows for deletion from {file_name}")
+
+        # Clean and normalize column names (uppercase, replace special chars with underscores)
+        import re
+        def normalize_col(c):
+            normalized = re.sub(r'[^A-Z0-9_]', '_', str(c).upper().strip())
+            normalized = re.sub(r'_+', '_', normalized)  # Collapse multiple underscores
+            return normalized.strip('_')  # Remove leading/trailing underscores
+        
+        df.columns = [normalize_col(c) for c in df.columns]
+
+        # Validate PKs exist (case-insensitive)
+        df_cols_upper = {c.upper() for c in df.columns}
+        missing_pks = [pk for pk in primary_key_columns if pk.upper() not in df_cols_upper]
+        if missing_pks:
+            raise ValueError(
+                f"Primary key columns not found in file: {missing_pks}. "
+                f"Available columns: {list(df.columns)}"
+            )
+
+        # Drop rows where PK is null
+        pk_null_mask = df[primary_key_columns].isna().any(axis=1)
+        null_pk_count = pk_null_mask.sum()
+        if null_pk_count > 0:
+            logger.warning(f"[{batch_id}] Dropping {null_pk_count} rows with null PKs")
+            df = df[~pk_null_mask]
+
+        # Process deletions
+        total = len(df)
+        deleted = 0
+        not_found = 0
+        errors = 0
+        error_details = []
+
+        # Import here to avoid circular imports
+        from app.models.audit import AuditLog
+        from sqlalchemy import text as sa_text
+        from datetime import datetime
+        import json
+
+        # Create engine for data database
+        from app.core.config import get_settings
+        from sqlalchemy import create_engine
+        settings = get_settings()
+        data_engine = create_engine(settings.DATA_DB_URL)
+
+        row_changes = []
+        for idx, row in df.iterrows():
+            try:
+                # Build WHERE clause
+                where_parts = []
+                params = {}
+                for pk in primary_key_columns:
+                    val = row[pk]
+                    if pd.isna(val):
+                        continue
+                    param_name = f"pk_{pk}"
+                    where_parts.append(f"[{pk}] = :{param_name}")
+                    params[param_name] = val
+
+                if not where_parts:
+                    not_found += 1
+                    continue
+
+                where_clause = " AND ".join(where_parts)
+
+                # First, fetch the existing record for audit log
+                select_sql = f"SELECT * FROM [{table_name}] WHERE {where_clause}"
+                with data_engine.connect() as data_conn:
+                    result = data_conn.execute(sa_text(select_sql), params)
+                    existing_row = result.fetchone()
+
+                if not existing_row:
+                    not_found += 1
+                    continue
+
+                # Delete the row
+                delete_sql = f"DELETE FROM [{table_name}] WHERE {where_clause}"
+                with data_engine.connect() as data_conn:
+                    data_conn.execute(sa_text(delete_sql), params)
+                    data_conn.commit()
+
+                # Log deletion to audit
+                pk_value = "|".join(str(row[pk]) for pk in primary_key_columns)
+                old_data = {k: str(v) if v is not None else None for k, v in existing_row._mapping.items()}
+                row_changes.append({
+                    "action_type": "DELETE",
+                    "record_key": pk_value,
+                    "changes": None,
+                    "old_data": old_data,
+                })
+
+                deleted += 1
+
+            except Exception as e:
+                errors += 1
+                error_details.append(f"Row {idx + 1}: {str(e)}")
+                logger.error(f"[{batch_id}] Error deleting row {idx + 1}: {e}")
+
+        # Log DataChangeLog for batch details (delete)
+        from app.services.audit_service import log_bulk_changes
+        if row_changes:
+            log_bulk_changes(
+                table_name=table_name,
+                batch_id=batch_id,
+                row_changes=row_changes,
+                changed_by=changed_by,
+                source="UPLOAD",
+            )
+
+        duration_ms = int((time.time() - start_time) * 1000)
+
+        result = {
+            "total": total,
+            "deleted": deleted,
+            "not_found": not_found,
+            "errors": errors,
+            "error_details": error_details[:10],  # Limit error details
+            "file_name": file_name,
+            "file_size_bytes": len(file_content),
+            "null_pk_rows_dropped": int(null_pk_count),
+            "saved_file": saved_path,
+            "total_duration_ms": duration_ms,
+        }
+
+        logger.info(
+            f"[{batch_id}] Delete complete: {file_name} → {table_name} | "
+            f"{deleted} deleted, {not_found} not found, {errors} errors | {duration_ms}ms"
         )
 
         return result
@@ -237,16 +467,36 @@ class FileUploadService:
         raise ValueError(f"Unsupported file extension: {ext}")
 
     def _clean_dataframe(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Clean DataFrame before upsert."""
-        # Strip whitespace from string columns
+        """
+        Clean DataFrame before upsert.
+        
+        Special handling:
+        - Blank/empty cells: marked as __SKIP__ (will not update existing value)
+        - '-' or '|' symbols: converted to NULL (will set DB value to NULL)
+        """
+        # Vectorized cleaning for object columns (much faster than apply)
         for col in df.select_dtypes(include=["object"]).columns:
-            df[col] = df[col].astype(str).str.strip()
-            # Replace 'nan' strings back to actual NaN
-            df[col] = df[col].replace({"nan": None, "None": None, "": None, "NaT": None})
+            # Replace NaN with __SKIP__, convert to string, and strip
+            cleaned = df[col].where(~df[col].isna(), "__SKIP__").astype(str).str.strip()
+            
+            # Replace empty/null representations with __SKIP__ and special chars with __NULL__
+            cleaned = cleaned.replace({
+                "nan": "__SKIP__",
+                "None": "__SKIP__",
+                "": "__SKIP__",
+                "NaT": "__SKIP__",
+                "-": "__NULL__",
+                "|": "__NULL__",
+            })
+            
+            df[col] = cleaned
 
-        # Convert numeric-looking strings
+        # Convert numeric-looking strings (optional, can be skipped for speed)
         for col in df.columns:
             if df[col].dtype == "object":
+                # Skip columns that have special markers
+                if df[col].isin(["__SKIP__", "__NULL__"]).any():
+                    continue
                 try:
                     numeric = pd.to_numeric(df[col], errors="coerce")
                     # Only convert if >80% values are numeric

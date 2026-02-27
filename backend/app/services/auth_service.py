@@ -139,12 +139,13 @@ class AuthService:
         # Check uniqueness
         if self.db.query(User).filter(User.username == data.username).first():
             raise ValueError(f"Username '{data.username}' already exists")
-        if self.db.query(User).filter(User.email == data.email).first():
-            raise ValueError(f"Email '{data.email}' already exists")
+        if self.db.query(User).filter(User.mobile_no == data.mobile_no).first():
+            raise ValueError(f"Mobile number '{data.mobile_no}' already exists")
 
         user = User(
             username=data.username,
             email=data.email,
+            mobile_no=data.mobile_no,
             password_hash=hash_password(data.password),
             full_name=data.full_name,
             employee_code=data.employee_code,
@@ -168,7 +169,7 @@ class AuthService:
             table_name="rbac_users",
             changed_by=created_by,
             record_pk=str(user.id),
-            new_data={"username": user.username, "email": user.email, "full_name": user.full_name},
+            new_data={"username": user.username, "mobile_no": user.mobile_no, "full_name": user.full_name},
         )
         self.db.commit()
         self.db.refresh(user)
@@ -181,12 +182,19 @@ class AuthService:
         if not user:
             raise ValueError("User not found")
 
-        old_data = {"email": user.email, "full_name": user.full_name, "is_active": user.is_active}
+        old_data = {"email": user.email, "mobile_no": user.mobile_no, "full_name": user.full_name, "is_active": user.is_active}
         changed = []
 
         if data.email is not None and data.email != user.email:
             user.email = data.email
             changed.append("email")
+        if data.mobile_no is not None and data.mobile_no != user.mobile_no:
+            # Check uniqueness
+            existing = self.db.query(User).filter(User.mobile_no == data.mobile_no, User.id != user_id).first()
+            if existing:
+                raise ValueError(f"Mobile number '{data.mobile_no}' already exists")
+            user.mobile_no = data.mobile_no
+            changed.append("mobile_no")
         if data.full_name is not None and data.full_name != user.full_name:
             user.full_name = data.full_name
             changed.append("full_name")
@@ -224,7 +232,7 @@ class AuthService:
                 changed_by=updated_by,
                 record_pk=str(user.id),
                 old_data=old_data,
-                new_data={"email": user.email, "full_name": user.full_name, "is_active": user.is_active},
+                new_data={"email": user.email, "mobile_no": user.mobile_no, "full_name": user.full_name, "is_active": user.is_active},
                 changed_columns=changed,
             )
 
@@ -246,6 +254,7 @@ class AuthService:
             query = query.filter(
                 (User.username.ilike(f"%{search}%")) |
                 (User.full_name.ilike(f"%{search}%")) |
+                (User.mobile_no.ilike(f"%{search}%")) |
                 (User.email.ilike(f"%{search}%"))
             )
 
@@ -286,6 +295,7 @@ class AuthService:
             id=user.id,
             username=user.username,
             email=user.email,
+            mobile_no=user.mobile_no,
             full_name=user.full_name,
             employee_code=user.employee_code,
             phone=user.phone,
@@ -314,6 +324,7 @@ def create_super_admin_if_needed(db: Session):
     user = User(
         username=settings.SUPER_ADMIN_USERNAME,
         email=settings.SUPER_ADMIN_EMAIL,
+        mobile_no="0000000000",
         password_hash=hash_password(settings.SUPER_ADMIN_PASSWORD),
         full_name="Super Administrator",
         created_by="SYSTEM",

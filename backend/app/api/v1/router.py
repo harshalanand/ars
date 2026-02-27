@@ -18,6 +18,13 @@ from app.api.v1.endpoints.upload import router as upload_router
 # Phase 3: Allocation Engine
 from app.api.v1.endpoints.allocations import router as allocations_router
 
+
+# Phase 5: Settings
+from app.api.v1.endpoints.settings import router as settings_router
+
+# Phase 6: Dashboard
+from app.api.v1.endpoints.dashboard import router as dashboard_router
+
 api_router = APIRouter(prefix="/api/v1")
 
 # Phase 1
@@ -34,3 +41,10 @@ api_router.include_router(upload_router)
 
 # Phase 3
 api_router.include_router(allocations_router)
+
+
+# Phase 5
+api_router.include_router(settings_router)
+
+# Phase 6
+api_router.include_router(dashboard_router)

@@ -34,7 +34,7 @@ from app.models.retail import (
 )
 from app.models.rls import Store
 from app.audit.service import AuditService
-from app.database.session import get_engine
+from app.database.session import get_data_engine
 
 
 class AllocationEngine:
@@ -60,7 +60,7 @@ class AllocationEngine:
 
     def __init__(self, db: Session):
         self.db = db
-        self.engine = get_engine()
+        self.engine = get_data_engine()  # Use Data DB for business data
         self.audit = AuditService(db)
 
     # ========================================================================

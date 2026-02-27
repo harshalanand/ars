@@ -46,7 +46,8 @@ class ChangePasswordRequest(BaseModel):
 
 class UserCreate(BaseModel):
     username: str = Field(..., min_length=3, max_length=100)
-    email: EmailStr
+    email: Optional[EmailStr] = None
+    mobile_no: str = Field(..., min_length=10, max_length=15)
     password: str = Field(..., min_length=8)
     full_name: str = Field(..., min_length=2, max_length=200)
     employee_code: Optional[str] = None
@@ -56,6 +57,7 @@ class UserCreate(BaseModel):
 
 class UserUpdate(BaseModel):
     email: Optional[EmailStr] = None
+    mobile_no: Optional[str] = None
     full_name: Optional[str] = None
     employee_code: Optional[str] = None
     phone: Optional[str] = None
@@ -66,7 +68,8 @@ class UserUpdate(BaseModel):
 class UserResponse(BaseModel):
     id: int
     username: str
-    email: str
+    email: Optional[str] = None
+    mobile_no: str
     full_name: str
     employee_code: Optional[str] = None
     phone: Optional[str] = None

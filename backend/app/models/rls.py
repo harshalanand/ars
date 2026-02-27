@@ -3,7 +3,7 @@ Row-Level Security Models: Store Access, Region Access, Column Restrictions
 """
 from datetime import datetime
 from sqlalchemy import (
-    Column, Integer, String, Boolean, DateTime, ForeignKey, UniqueConstraint
+    Column, Integer, BigInteger, String, Boolean, DateTime, ForeignKey, UniqueConstraint
 )
 from sqlalchemy.orm import relationship
 from app.database.session import Base
@@ -72,6 +72,8 @@ class ColumnRestriction(Base):
     is_visible = Column(Boolean, default=True)
     is_masked = Column(Boolean, default=False)
     mask_pattern = Column(String(100))
+    # Note: can_edit column is handled via raw SQL for backward compatibility
+    # Run migration 004 to add can_edit column to database
     created_at = Column(DateTime, default=datetime.utcnow)
 
     __table_args__ = (
@@ -79,3 +81,18 @@ class ColumnRestriction(Base):
     )
 
     role = relationship("Role", back_populates="column_restrictions")
+
+
+class TableSettings(Base):
+    """Configuration for table-specific settings like heavy table handling."""
+    __tablename__ = "table_settings"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    table_name = Column(String(200), nullable=False, unique=True)
+    is_heavy = Column(Boolean, default=False)  # Mark as heavy/large table
+    row_threshold = Column(Integer, default=100000)  # Rows threshold for heavy
+    require_filter = Column(Boolean, default=False)  # Require filter before loading
+    visible_in_editor = Column(Boolean, default=True)  # Show this table in Data Editor
+    filter_columns = Column(String(2000))  # JSON list of default filter columns
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

@@ -211,35 +211,100 @@ async def get_rls_context(
 
 def get_restricted_columns(db: Session, table_name: str, role_codes: List[str]) -> dict:
     """
-    Return dict of {column_name: {visible, masked, mask_pattern}} for a table + roles.
+    Return dict of {column_name: {visible, masked, mask_pattern, can_edit}} for a table + roles.
+    Backward compatible - works even if can_edit column doesn't exist in database.
     """
-    from app.models.rls import ColumnRestriction
-    from app.models.rbac import Role
-
-    restrictions = (
-        db.query(ColumnRestriction)
-        .join(Role)
-        .filter(
-            ColumnRestriction.table_name == table_name,
-            Role.role_code.in_(role_codes),
-        )
-        .all()
-    )
+    from sqlalchemy import text
+    
+    # Use raw SQL for backward compatibility (works even without can_edit column)
+    try:
+        # Check if can_edit column exists
+        check_sql = text("""
+            SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS 
+            WHERE TABLE_NAME = 'rls_column_restrictions' AND COLUMN_NAME = 'can_edit'
+        """)
+        has_can_edit = db.execute(check_sql).scalar() > 0
+        
+        if has_can_edit:
+            sql = text("""
+                SELECT cr.column_name, cr.is_visible, cr.is_masked, cr.mask_pattern, cr.can_edit
+                FROM rls_column_restrictions cr
+                INNER JOIN rbac_roles r ON r.id = cr.role_id
+                WHERE cr.table_name = :table_name AND r.role_code IN :role_codes
+            """)
+        else:
+            sql = text("""
+                SELECT cr.column_name, cr.is_visible, cr.is_masked, cr.mask_pattern, 1 as can_edit
+                FROM rls_column_restrictions cr
+                INNER JOIN rbac_roles r ON r.id = cr.role_id
+                WHERE cr.table_name = :table_name AND r.role_code IN :role_codes
+            """)
+        
+        # Handle single role code case for IN clause
+        if len(role_codes) == 1:
+            sql = text(sql.text.replace("IN :role_codes", "= :role_codes"))
+            params = {"table_name": table_name, "role_codes": role_codes[0]}
+        else:
+            params = {"table_name": table_name, "role_codes": tuple(role_codes)}
+        
+        rows = db.execute(sql, params).fetchall()
+    except Exception:
+        # If any error, return empty (no restrictions = all editable)
+        return {}
 
     result = {}
-    for r in restrictions:
-        col = r.column_name
+    for row in rows:
+        col = row[0]
+        is_visible = row[1]
+        is_masked = row[2]
+        mask_pattern = row[3]
+        can_edit_val = bool(row[4]) if row[4] is not None else True
+        
         # Most restrictive wins
         if col not in result:
-            result[col] = {"visible": r.is_visible, "masked": r.is_masked, "mask_pattern": r.mask_pattern}
+            result[col] = {
+                "visible": is_visible, 
+                "masked": is_masked, 
+                "mask_pattern": mask_pattern,
+                "can_edit": can_edit_val
+            }
         else:
-            if not r.is_visible:
+            if not is_visible:
                 result[col]["visible"] = False
-            if r.is_masked:
+            if is_masked:
                 result[col]["masked"] = True
-                result[col]["mask_pattern"] = r.mask_pattern
+                result[col]["mask_pattern"] = mask_pattern
+            if can_edit_val is False:
+                result[col]["can_edit"] = False
 
     return result
+
+
+def get_editable_columns(db: Session, table_name: str, role_codes: List[str], all_columns: List[str]) -> List[str]:
+    """
+    Return list of column names that the user can edit for a table.
+    
+    Logic:
+    - If no column restrictions exist for the table, all non-PK columns are editable
+    - If restrictions exist, only columns with can_edit=True are editable
+    """
+    restrictions = get_restricted_columns(db, table_name, role_codes)
+    
+    # If no restrictions, all columns are editable
+    if not restrictions:
+        return all_columns
+    
+    # Filter to only editable columns
+    editable = []
+    for col in all_columns:
+        if col in restrictions:
+            if restrictions[col].get("can_edit", True):
+                editable.append(col)
+        else:
+            # Column not in restrictions means it's editable
+            editable.append(col)
+    
+    return editable
 
 
 def apply_column_security(data: dict, restrictions: dict) -> dict:

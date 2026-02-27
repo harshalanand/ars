@@ -8,15 +8,17 @@ const useAuthStore = create((set, get) => ({
   loading: false,
   permissions: [],
   roles: [],
+  loginTime: localStorage.getItem('login_time') ? new Date(localStorage.getItem('login_time')) : null,
 
   login: async (username, password) => {
     set({ loading: true })
     try {
       const { data } = await authAPI.login(username, password)
-      const d = data.data
-      localStorage.setItem('access_token', d.access_token)
-      localStorage.setItem('refresh_token', d.refresh_token)
-      set({ isAuthenticated: true, loading: false })
+      const loginTime = new Date()
+      localStorage.setItem('access_token', data.access_token)
+      localStorage.setItem('refresh_token', data.refresh_token)
+      localStorage.setItem('login_time', loginTime.toISOString())
+      set({ isAuthenticated: true, loading: false, loginTime })
       await get().fetchUser()
       toast.success('Login successful')
       return true
@@ -31,20 +33,22 @@ const useAuthStore = create((set, get) => ({
     try {
       const { data } = await authAPI.me()
       const u = data.data
+      const storedLoginTime = localStorage.getItem('login_time')
       set({
         user: u,
         permissions: u.permissions || [],
         roles: (u.roles || []).map(r => r.role_name || r),
         isAuthenticated: true,
+        loginTime: storedLoginTime ? new Date(storedLoginTime) : null,
       })
     } catch {
-      set({ user: null, isAuthenticated: false })
+      set({ user: null, isAuthenticated: false, loginTime: null })
     }
   },
 
   logout: () => {
     localStorage.clear()
-    set({ user: null, isAuthenticated: false, permissions: [], roles: [] })
+    set({ user: null, isAuthenticated: false, permissions: [], roles: [], loginTime: null })
     toast.success('Logged out')
   },
 

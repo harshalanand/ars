@@ -18,7 +18,7 @@ export default function RLSPage() {
     const load = async () => {
       try {
         const [u, s] = await Promise.allSettled([usersAPI.list(), rlsAPI.stores()])
-        if (u.status === 'fulfilled') setUsers(u.value.data.data || [])
+        if (u.status === 'fulfilled') setUsers(u.value.data.data?.users || [])
         if (s.status === 'fulfilled') setStores(s.value.data.data || [])
       } finally { setLoading(false) }
     }
@@ -29,8 +29,8 @@ export default function RLSPage() {
     setSelectedUser(user)
     try {
       const [sa, ra] = await Promise.allSettled([
-        rlsAPI.storeAccess(user.user_id),
-        rlsAPI.regionAccess(user.user_id),
+        rlsAPI.storeAccess(user.id),
+        rlsAPI.regionAccess(user.id),
       ])
       if (sa.status === 'fulfilled') setStoreAccess(sa.value.data.data || [])
       if (ra.status === 'fulfilled') setRegionAccess(ra.value.data.data || [])
@@ -40,7 +40,7 @@ export default function RLSPage() {
   const addStore = async () => {
     if (!selectedUser || !newStore.trim()) return
     try {
-      await rlsAPI.addStoreAccess({ user_id: selectedUser.user_id, store_code: newStore.trim() })
+      await rlsAPI.addStoreAccess({ user_id: selectedUser.id, store_codes: [newStore.trim()] })
       toast.success('Store access added')
       setNewStore('')
       selectUser(selectedUser)
@@ -50,7 +50,7 @@ export default function RLSPage() {
   const removeStore = async (code) => {
     if (!selectedUser) return
     try {
-      await rlsAPI.deleteStoreAccess(selectedUser.user_id, code)
+      await rlsAPI.deleteStoreAccess(selectedUser.id, code)
       toast.success('Store access removed')
       selectUser(selectedUser)
     } catch {}
@@ -59,7 +59,7 @@ export default function RLSPage() {
   const addRegion = async () => {
     if (!selectedUser || !newRegion.trim()) return
     try {
-      await rlsAPI.addRegionAccess({ user_id: selectedUser.user_id, region_code: newRegion.trim() })
+      await rlsAPI.addRegionAccess({ user_id: selectedUser.id, region: newRegion.trim() })
       toast.success('Region access added')
       setNewRegion('')
       selectUser(selectedUser)
@@ -91,9 +91,9 @@ export default function RLSPage() {
             {loading ? (
               <div className="p-4 text-gray-400 text-sm">Loading...</div>
             ) : filteredUsers.map(u => (
-              <button key={u.user_id} onClick={() => selectUser(u)}
-                className={`w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-gray-50 ${selectedUser?.user_id === u.user_id ? 'bg-primary-50 border-l-2 border-primary-600' : ''}`}>
-                <Eye size={16} className={selectedUser?.user_id === u.user_id ? 'text-primary-600' : 'text-gray-400'} />
+              <button key={u.id} onClick={() => selectUser(u)}
+                className={`w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-gray-50 ${selectedUser?.id === u.id ? 'bg-primary-50 border-l-2 border-primary-600' : ''}`}>
+                <Eye size={16} className={selectedUser?.id === u.id ? 'text-primary-600' : 'text-gray-400'} />
                 <div>
                   <div className="text-sm font-medium">{u.username}</div>
                   <div className="text-xs text-gray-500">{u.full_name}</div>
@@ -147,10 +147,10 @@ export default function RLSPage() {
                   {regionAccess.length === 0 ? (
                     <span className="text-sm text-gray-400">No regions assigned</span>
                   ) : regionAccess.map(r => {
-                    const code = r.region_code || r
+                    const label = r.region || r.hub || r.division || r.business_unit || 'Unknown'
                     return (
-                      <div key={code} className="flex items-center gap-1.5 bg-emerald-50 text-emerald-700 px-3 py-1.5 rounded-lg text-sm">
-                        {code}
+                      <div key={r.id} className="flex items-center gap-1.5 bg-emerald-50 text-emerald-700 px-3 py-1.5 rounded-lg text-sm">
+                        {label}
                       </div>
                     )
                   })}

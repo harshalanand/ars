@@ -21,7 +21,7 @@ router = APIRouter(prefix="/roles", tags=["Roles & Permissions"])
 # Roles
 # ============================================================================
 
-@router.get("/", response_model=APIResponse)
+@router.get("", response_model=APIResponse)
 async def list_roles(db: Session = Depends(get_db), _: User = Depends(get_current_user)):
     """List all roles."""
     roles = db.query(Role).filter(Role.is_active == True).all()
@@ -37,7 +37,7 @@ async def list_roles(db: Session = Depends(get_db), _: User = Depends(get_curren
 
 
 @router.post(
-    "/",
+    "",
     response_model=APIResponse,
     dependencies=[Depends(RequirePermissions(["ADMIN_ROLES_MANAGE"]))],
 )

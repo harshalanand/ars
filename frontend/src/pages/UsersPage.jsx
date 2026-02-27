@@ -14,7 +14,7 @@ export default function UsersPage() {
     setLoading(true)
     try {
       const [u, r] = await Promise.allSettled([usersAPI.list(), rolesAPI.list()])
-      if (u.status === 'fulfilled') setUsers(u.value.data.data || [])
+      if (u.status === 'fulfilled') setUsers(u.value.data.data?.users || [])
       if (r.status === 'fulfilled') setRoles(r.value.data.data || [])
     } finally { setLoading(false) }
   }
@@ -24,6 +24,7 @@ export default function UsersPage() {
   const filtered = users.filter(u =>
     (u.username || '').toLowerCase().includes(search.toLowerCase()) ||
     (u.full_name || '').toLowerCase().includes(search.toLowerCase()) ||
+    (u.mobile_no || '').toLowerCase().includes(search.toLowerCase()) ||
     (u.email || '').toLowerCase().includes(search.toLowerCase())
   )
 
@@ -52,6 +53,7 @@ export default function UsersPage() {
             <tr className="bg-gray-50 border-b text-left">
               <th className="px-4 py-3 font-semibold text-gray-600">Username</th>
               <th className="px-4 py-3 font-semibold text-gray-600">Full Name</th>
+              <th className="px-4 py-3 font-semibold text-gray-600">Mobile No</th>
               <th className="px-4 py-3 font-semibold text-gray-600">Email</th>
               <th className="px-4 py-3 font-semibold text-gray-600">Roles</th>
               <th className="px-4 py-3 font-semibold text-gray-600">Status</th>
@@ -60,14 +62,15 @@ export default function UsersPage() {
           </thead>
           <tbody>
             {loading ? (
-              <tr><td colSpan="6" className="px-4 py-10 text-center text-gray-400">Loading...</td></tr>
+              <tr><td colSpan="7" className="px-4 py-10 text-center text-gray-400">Loading...</td></tr>
             ) : filtered.length === 0 ? (
-              <tr><td colSpan="6" className="px-4 py-10 text-center text-gray-400">No users found</td></tr>
+              <tr><td colSpan="7" className="px-4 py-10 text-center text-gray-400">No users found</td></tr>
             ) : (
               filtered.map(u => (
-                <tr key={u.user_id} className="border-b hover:bg-gray-50">
+                <tr key={u.id} className="border-b hover:bg-gray-50">
                   <td className="px-4 py-3 font-medium text-gray-900">{u.username}</td>
                   <td className="px-4 py-3">{u.full_name}</td>
+                  <td className="px-4 py-3">{u.mobile_no}</td>
                   <td className="px-4 py-3 text-gray-500">{u.email}</td>
                   <td className="px-4 py-3">
                     <div className="flex flex-wrap gap-1">
@@ -85,7 +88,7 @@ export default function UsersPage() {
                     <div className="flex gap-1">
                       <button onClick={() => setModal(u)} className="btn-ghost btn-sm p-1"><Edit2 size={14} /></button>
                       {u.is_locked && (
-                        <button onClick={() => handleUnlock(u.user_id)} className="btn-ghost btn-sm p-1 text-amber-600"><Unlock size={14} /></button>
+                        <button onClick={() => handleUnlock(u.id)} className="btn-ghost btn-sm p-1 text-amber-600"><Unlock size={14} /></button>
                       )}
                     </div>
                   </td>
@@ -103,13 +106,14 @@ export default function UsersPage() {
 }
 
 function UserModal({ user, roles, onClose, onSaved }) {
-  const isEdit = !!user?.user_id
+  const isEdit = !!user?.id
   const [form, setForm] = useState({
     username: user?.username || '',
     full_name: user?.full_name || '',
     email: user?.email || '',
+    mobile_no: user?.mobile_no || '',
     password: '',
-    role_ids: user?.roles?.map(r => r.role_id) || [],
+    role_ids: user?.roles?.map(r => r.id || r) || [],
     is_active: user?.is_active ?? true,
   })
   const [saving, setSaving] = useState(false)
@@ -129,7 +133,7 @@ function UserModal({ user, roles, onClose, onSaved }) {
       if (isEdit) {
         const payload = { ...form }
         if (!payload.password) delete payload.password
-        await usersAPI.update(user.user_id, payload)
+        await usersAPI.update(user.id, payload)
         toast.success('User updated')
       } else {
         if (!form.password) return toast.error('Password required for new user')
@@ -158,9 +162,15 @@ function UserModal({ user, roles, onClose, onSaved }) {
               <input value={form.full_name} onChange={e => update('full_name', e.target.value)} className="input" />
             </div>
           </div>
-          <div>
-            <label className="label">Email</label>
-            <input type="email" value={form.email} onChange={e => update('email', e.target.value)} className="input" />
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="label">Email</label>
+              <input type="email" value={form.email} onChange={e => update('email', e.target.value)} className="input" />
+            </div>
+            <div>
+              <label className="label">Mobile No*</label>
+              <input value={form.mobile_no} onChange={e => update('mobile_no', e.target.value)} className="input" required placeholder="10 digit mobile number" />
+            </div>
           </div>
           <div>
             <label className="label">{isEdit ? 'New Password (leave blank to keep)' : 'Password*'}</label>
@@ -170,8 +180,8 @@ function UserModal({ user, roles, onClose, onSaved }) {
             <label className="label">Roles</label>
             <div className="flex flex-wrap gap-2 mt-1">
               {roles.map(r => (
-                <button key={r.role_id} type="button" onClick={() => toggleRole(r.role_id)}
-                  className={`px-3 py-1.5 text-xs rounded-lg border transition-colors ${form.role_ids.includes(r.role_id) ? 'bg-primary-600 text-white border-primary-600' : 'bg-white text-gray-600 border-gray-300 hover:border-primary-400'}`}>
+                <button key={r.id} type="button" onClick={() => toggleRole(r.id || r)}
+                  className={`px-3 py-1.5 text-xs rounded-lg border transition-colors ${form.role_ids.includes(r.id || r) ? 'bg-primary-600 text-white border-primary-600' : 'bg-white text-gray-600 border-gray-300 hover:border-primary-400'}`}>
                   {r.role_name}
                 </button>
               ))}

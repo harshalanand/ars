@@ -1,0 +1,329 @@
+import { useState, useEffect } from 'react'
+import { Link } from 'react-router-dom'
+import { 
+  Upload, Download, Database, Clock, CheckCircle2, XCircle, 
+  AlertCircle, RefreshCw, BarChart3, Activity, FileText, 
+  TrendingUp, Users, Table2, Zap
+} from 'lucide-react'
+import { uploadAPI, auditAPI } from '@/services/api'
+import api from '@/services/api'
+import toast from 'react-hot-toast'
+import { format, formatDistanceToNow } from 'date-fns'
+
+export default function JobsDashboardPage() {
+  const [uploadJobs, setUploadJobs] = useState([])
+  const [exportJobs, setExportJobs] = useState([])
+  const [recentAudit, setRecentAudit] = useState([])
+  const [stats, setStats] = useState(null)
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    loadAll()
+    const interval = setInterval(loadAll, 10000) // Refresh every 10s
+    return () => clearInterval(interval)
+  }, [])
+
+  const loadAll = async () => {
+    try {
+      const [uploadsRes, exportsRes, auditRes, statsRes] = await Promise.all([
+        uploadAPI.jobs().catch(() => ({ data: { data: [] } })),
+        api.get('/tables/export/jobs').catch(() => ({ data: { data: [] } })),
+        auditAPI.list({ page_size: 20 }).catch(() => ({ data: { data: { logs: [] } } })),
+        api.get('/dashboard/stats').catch(() => ({ data: { data: null } })),
+      ])
+      
+      setUploadJobs(uploadsRes.data?.data || [])
+      setExportJobs(exportsRes.data?.data || [])
+      setRecentAudit(auditRes.data?.data?.logs || [])
+      setStats(statsRes.data?.data)
+    } catch (err) {
+      console.error('Failed to load dashboard data:', err)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const getStatusBadge = (status) => {
+    const styles = {
+      pending: 'bg-yellow-100 text-yellow-700',
+      running: 'bg-blue-100 text-blue-700',
+      completed: 'bg-green-100 text-green-700',
+      failed: 'bg-red-100 text-red-700',
+      cancelled: 'bg-gray-100 text-gray-700',
+    }
+    const icons = {
+      pending: <Clock size={12} />,
+      running: <Activity size={12} className="animate-pulse" />,
+      completed: <CheckCircle2 size={12} />,
+      failed: <XCircle size={12} />,
+      cancelled: <AlertCircle size={12} />,
+    }
+    return (
+      <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${styles[status] || styles.pending}`}>
+        {icons[status]} {status}
+      </span>
+    )
+  }
+
+  const formatNumber = (num) => {
+    if (!num) return '0'
+    if (num >= 1000000) return (num / 1000000).toFixed(1) + 'M'
+    if (num >= 1000) return (num / 1000).toFixed(1) + 'K'
+    return num.toLocaleString()
+  }
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center h-64">
+        <RefreshCw className="animate-spin text-primary-500" size={32} />
+      </div>
+    )
+  }
+
+  // Count jobs by status
+  const uploadsByStatus = uploadJobs.reduce((acc, j) => {
+    acc[j.status] = (acc[j.status] || 0) + 1
+    return acc
+  }, {})
+  const exportsByStatus = exportJobs.reduce((acc, j) => {
+    acc[j.status] = (acc[j.status] || 0) + 1
+    return acc
+  }, {})
+
+  return (
+    <div className="space-y-6">
+      {/* Header */}
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-bold text-gray-900">Jobs Dashboard</h1>
+          <p className="text-gray-500 text-sm mt-0.5">Monitor all upload, export and data operations</p>
+        </div>
+        <button onClick={loadAll} className="btn-secondary">
+          <RefreshCw size={14} /> Refresh
+        </button>
+      </div>
+
+      {/* Stats Cards */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+        <StatsCard
+          icon={<Upload className="text-blue-500" />}
+          title="Upload Jobs"
+          value={uploadJobs.length}
+          subtitle={`${uploadsByStatus.running || 0} running, ${uploadsByStatus.completed || 0} completed`}
+          color="blue"
+        />
+        <StatsCard
+          icon={<Download className="text-green-500" />}
+          title="Export Jobs"
+          value={exportJobs.length}
+          subtitle={`${exportsByStatus.running || 0} running, ${exportsByStatus.completed || 0} completed`}
+          color="green"
+        />
+        <StatsCard
+          icon={<FileText className="text-purple-500" />}
+          title="Audit Entries"
+          value={formatNumber(stats?.total_audit_logs || recentAudit.length)}
+          subtitle="Last 24 hours"
+          color="purple"
+        />
+        <StatsCard
+          icon={<Database className="text-orange-500" />}
+          title="Tables"
+          value={stats?.total_tables || '-'}
+          subtitle={`${formatNumber(stats?.total_rows || 0)} total rows`}
+          color="orange"
+        />
+      </div>
+
+      {/* Main Content Grid */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        {/* Upload Jobs */}
+        <div className="card">
+          <div className="card-header flex items-center justify-between">
+            <h2 className="font-semibold flex items-center gap-2">
+              <Upload size={16} className="text-blue-500" /> Recent Upload Jobs
+            </h2>
+            <Link to="/data/upload" className="text-xs text-primary-600 hover:text-primary-700">
+              View All →
+            </Link>
+          </div>
+          <div className="divide-y max-h-80 overflow-auto">
+            {uploadJobs.length === 0 ? (
+              <div className="p-8 text-center text-gray-400">No upload jobs</div>
+            ) : (
+              uploadJobs.slice(0, 10).map(job => (
+                <div key={job.job_id} className="p-3 hover:bg-gray-50">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-2">
+                        <span className="font-medium text-sm truncate">{job.table_name}</span>
+                        {getStatusBadge(job.status)}
+                      </div>
+                      <div className="text-xs text-gray-500 mt-1">
+                        {job.file_name} • {formatNumber(job.total_rows)} rows
+                      </div>
+                      {job.status === 'running' && job.total_rows > 0 && (
+                        <div className="mt-2">
+                          <div className="flex items-center justify-between text-xs text-gray-500 mb-1">
+                            <span>{formatNumber(job.processed_rows)} / {formatNumber(job.total_rows)}</span>
+                            <span>{Math.round((job.processed_rows / job.total_rows) * 100)}%</span>
+                          </div>
+                          <div className="h-1.5 bg-gray-200 rounded-full overflow-hidden">
+                            <div 
+                              className="h-full bg-blue-500 transition-all duration-500"
+                              style={{ width: `${(job.processed_rows / job.total_rows) * 100}%` }}
+                            />
+                          </div>
+                        </div>
+                      )}
+                      {job.status === 'completed' && (
+                        <div className="text-xs text-gray-500 mt-1">
+                          <span className="text-green-600">+{formatNumber(job.inserted_rows)} inserted</span>
+                          {job.updated_rows > 0 && <span className="text-blue-600 ml-2">~{formatNumber(job.updated_rows)} updated</span>}
+                        </div>
+                      )}
+                      {job.status === 'failed' && job.error_message && (
+                        <div className="text-xs text-red-600 mt-1 truncate">{job.error_message}</div>
+                      )}
+                    </div>
+                    <div className="text-xs text-gray-400 shrink-0">
+                      {job.created_at ? formatDistanceToNow(new Date(job.created_at), { addSuffix: true }) : ''}
+                    </div>
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+
+        {/* Export Jobs */}
+        <div className="card">
+          <div className="card-header flex items-center justify-between">
+            <h2 className="font-semibold flex items-center gap-2">
+              <Download size={16} className="text-green-500" /> Recent Export Jobs
+            </h2>
+            <Link to="/data/export" className="text-xs text-primary-600 hover:text-primary-700">
+              View All →
+            </Link>
+          </div>
+          <div className="divide-y max-h-80 overflow-auto">
+            {exportJobs.length === 0 ? (
+              <div className="p-8 text-center text-gray-400">No export jobs</div>
+            ) : (
+              exportJobs.slice(0, 10).map(job => (
+                <div key={job.job_id} className="p-3 hover:bg-gray-50">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-2">
+                        <span className="font-medium text-sm truncate">{job.table_name}</span>
+                        {getStatusBadge(job.status)}
+                      </div>
+                      <div className="text-xs text-gray-500 mt-1">
+                        {job.format?.toUpperCase()} • {formatNumber(job.total_rows)} rows
+                        {job.file_size && ` • ${(job.file_size / 1024 / 1024).toFixed(1)} MB`}
+                      </div>
+                      {job.status === 'completed' && job.downloaded > 0 && (
+                        <div className="text-xs text-gray-500 mt-1">
+                          Downloaded {job.downloaded} time(s)
+                        </div>
+                      )}
+                    </div>
+                    <div className="text-xs text-gray-400 shrink-0">
+                      {job.created_at ? formatDistanceToNow(new Date(job.created_at), { addSuffix: true }) : ''}
+                    </div>
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Recent Audit Activity */}
+      <div className="card">
+        <div className="card-header flex items-center justify-between">
+          <h2 className="font-semibold flex items-center gap-2">
+            <Activity size={16} className="text-purple-500" /> Recent Audit Activity
+          </h2>
+          <Link to="/settings/audit" className="text-xs text-primary-600 hover:text-primary-700">
+            View All →
+          </Link>
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead className="bg-gray-50 text-xs text-gray-500 uppercase">
+              <tr>
+                <th className="px-4 py-2 text-left">Table</th>
+                <th className="px-4 py-2 text-left">Action</th>
+                <th className="px-4 py-2 text-left">Changed By</th>
+                <th className="px-4 py-2 text-left">Rows</th>
+                <th className="px-4 py-2 text-left">Source</th>
+                <th className="px-4 py-2 text-left">Time</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y">
+              {recentAudit.length === 0 ? (
+                <tr>
+                  <td colSpan={6} className="px-4 py-8 text-center text-gray-400">No audit logs</td>
+                </tr>
+              ) : (
+                recentAudit.map(log => (
+                  <tr key={log.id} className="hover:bg-gray-50">
+                    <td className="px-4 py-2 font-medium">{log.table_name}</td>
+                    <td className="px-4 py-2">
+                      <span className={`px-2 py-0.5 rounded text-xs font-medium ${
+                        log.action_type === 'INSERT' || log.action_type === 'BULK_UPSERT' ? 'bg-green-100 text-green-700' :
+                        log.action_type === 'UPDATE' ? 'bg-blue-100 text-blue-700' :
+                        log.action_type === 'DELETE' ? 'bg-red-100 text-red-700' :
+                        'bg-gray-100 text-gray-700'
+                      }`}>
+                        {log.action_type}
+                      </span>
+                    </td>
+                    <td className="px-4 py-2 text-gray-600">{log.changed_by}</td>
+                    <td className="px-4 py-2 text-gray-600">{formatNumber(log.row_count)}</td>
+                    <td className="px-4 py-2">
+                      <span className={`px-2 py-0.5 rounded text-xs ${
+                        log.source === 'UPLOAD' ? 'bg-blue-50 text-blue-600' :
+                        log.source === 'UI' ? 'bg-purple-50 text-purple-600' :
+                        'bg-gray-50 text-gray-600'
+                      }`}>
+                        {log.source}
+                      </span>
+                    </td>
+                    <td className="px-4 py-2 text-gray-500 text-xs">
+                      {log.changed_at ? formatDistanceToNow(new Date(log.changed_at), { addSuffix: true }) : ''}
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function StatsCard({ icon, title, value, subtitle, color }) {
+  const colors = {
+    blue: 'from-blue-50 to-blue-100 border-blue-200',
+    green: 'from-green-50 to-green-100 border-green-200',
+    purple: 'from-purple-50 to-purple-100 border-purple-200',
+    orange: 'from-orange-50 to-orange-100 border-orange-200',
+  }
+  return (
+    <div className={`p-4 rounded-xl bg-gradient-to-br ${colors[color]} border`}>
+      <div className="flex items-start justify-between">
+        <div>
+          <p className="text-xs text-gray-500 font-medium">{title}</p>
+          <p className="text-2xl font-bold text-gray-900 mt-1">{value}</p>
+          <p className="text-xs text-gray-500 mt-1">{subtitle}</p>
+        </div>
+        <div className="p-2 bg-white rounded-lg shadow-sm">
+          {icon}
+        </div>
+      </div>
+    </div>
+  )
+}

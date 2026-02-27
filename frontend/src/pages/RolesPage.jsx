@@ -24,7 +24,7 @@ export default function RolesPage() {
 
   const selectRole = (role) => {
     setSelectedRole(role)
-    setRolePerms((role.permissions || []).map(p => p.permission_code || p))
+    setRolePerms(role.permissions || [])
   }
 
   const togglePerm = (code) => {
@@ -34,7 +34,7 @@ export default function RolesPage() {
   const savePerms = async () => {
     if (!selectedRole) return
     try {
-      await rolesAPI.assignPermissions(selectedRole.role_id, { permission_codes: rolePerms })
+      await rolesAPI.assignPermissions(selectedRole.id, { permission_codes: rolePerms })
       toast.success('Permissions updated')
       load()
     } catch {}
@@ -67,9 +67,9 @@ export default function RolesPage() {
             {loading ? (
               <div className="p-4 text-gray-400">Loading...</div>
             ) : roles.map(r => (
-              <button key={r.role_id} onClick={() => selectRole(r)}
-                className={`w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-gray-50 transition-colors ${selectedRole?.role_id === r.role_id ? 'bg-primary-50 border-l-2 border-primary-600' : ''}`}>
-                <Shield size={16} className={selectedRole?.role_id === r.role_id ? 'text-primary-600' : 'text-gray-400'} />
+              <button key={r.id} onClick={() => selectRole(r)}
+                className={`w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-gray-50 transition-colors ${selectedRole?.id === r.id ? 'bg-primary-50 border-l-2 border-primary-600' : ''}`}>
+                <Shield size={16} className={selectedRole?.id === r.id ? 'text-primary-600' : 'text-gray-400'} />
                 <div>
                   <div className="text-sm font-medium text-gray-900">{r.role_name}</div>
                   <div className="text-xs text-gray-500">{r.description || 'No description'}</div>

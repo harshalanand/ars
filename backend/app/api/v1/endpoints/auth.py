@@ -66,6 +66,7 @@ async def get_me(current_user: User = Depends(get_current_user)):
             email=current_user.email,
             full_name=current_user.full_name,
             employee_code=current_user.employee_code,
+            mobile_no=current_user.mobile_no,
             phone=current_user.phone,
             is_active=current_user.is_active,
             is_locked=current_user.is_locked,
@@ -75,3 +76,27 @@ async def get_me(current_user: User = Depends(get_current_user)):
             permissions=list(current_user.permissions),
         ).model_dump()
     )
+
+
+from pydantic import BaseModel
+from typing import Optional
+
+class ProfileUpdate(BaseModel):
+    full_name: Optional[str] = None
+    email: Optional[str] = None
+
+
+@router.put("/profile", response_model=APIResponse)
+async def update_profile(
+    body: ProfileUpdate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Update current user's profile (full_name, email only)."""
+    if body.full_name is not None:
+        current_user.full_name = body.full_name
+    if body.email is not None:
+        current_user.email = body.email
+    db.commit()
+    db.refresh(current_user)
+    return APIResponse(message="Profile updated successfully")

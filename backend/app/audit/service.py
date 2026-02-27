@@ -57,10 +57,11 @@ class AuditService:
                 notes=notes,
             )
             self.db.add(entry)
-            self.db.flush()
+            self.db.commit()  # Commit the audit entry to the database
             return entry
         except Exception as e:
             logger.error(f"Audit log failed: {e}")
+            self.db.rollback()
             # Audit failure should NOT block the operation
             return None
 
@@ -127,6 +128,7 @@ class AuditService:
         batch_id: Optional[str] = None,
         duration_ms: Optional[int] = None,
         notes: Optional[str] = None,
+        source: str = "UPLOAD",
         **kwargs,
     ):
         if not batch_id:
@@ -135,7 +137,7 @@ class AuditService:
             table_name=table_name,
             action_type="BULK_UPLOAD",
             changed_by=changed_by,
-            source="UPLOAD",
+            source=source,
             batch_id=batch_id,
             row_count=row_count,
             duration_ms=duration_ms,

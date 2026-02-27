@@ -12,7 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
 
 from app.core.config import get_settings
-from app.database.session import check_db_connection, SessionLocal
+from app.database.session import check_db_connection, check_data_db_connection, SessionLocal
 from app.api.v1.router import api_router
 from app.middleware.exception_handler import global_exception_handler, request_logging_middleware
 
@@ -73,6 +73,7 @@ app = FastAPI(
     docs_url="/docs",
     redoc_url="/redoc",
     lifespan=lifespan,
+    redirect_slashes=False,
 )
 
 # Store debug flag for exception handler

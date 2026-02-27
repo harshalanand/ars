@@ -1,8 +1,11 @@
 """
 Dynamic Table Management API Endpoints
 """
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Body
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
+from typing import List, Dict, Any
+import io
 
 from app.database.session import get_db
 from app.schemas.table_mgmt import CreateTableRequest, AlterTableRequest
@@ -19,7 +22,7 @@ router = APIRouter(prefix="/tables", tags=["Table Management"])
 # ============================================================================
 
 @router.post(
-    "/",
+    "",
     response_model=APIResponse,
     dependencies=[Depends(RequirePermissions(["TABLE_CREATE"]))],
 )
@@ -59,9 +62,54 @@ async def alter_table(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Alter table: add/drop/rename columns."""
+    """Alter table: add/drop/rename/alter columns."""
     try:
         service = TableManagementService(db)
+        
+        # Handle alter_column action (change data type)
+        if body.action == 'alter_column' and body.column_name and body.new_type:
+            result = service.alter_column_type(
+                table_name=table_name,
+                column_name=body.column_name,
+                new_type=body.new_type,
+                changed_by=current_user.username,
+            )
+            return APIResponse(data=result, message="Column type changed successfully")
+        
+        # Handle drop_column action
+        if body.action == 'drop_column' and body.column_name:
+            result = service.alter_table(
+                table_name=table_name,
+                drop_columns=[body.column_name],
+                changed_by=current_user.username,
+            )
+            return APIResponse(data=result, message="Column dropped successfully")
+        
+        # Handle add_column action
+        if body.action == 'add_column' and body.column_name and body.data_type:
+            # Build column definition
+            col_def = {
+                "column_name": body.column_name,
+                "data_type": body.data_type,
+                "is_nullable": body.nullable if body.nullable is not None else True,
+            }
+            result = service.alter_table(
+                table_name=table_name,
+                add_columns=[col_def],
+                changed_by=current_user.username,
+            )
+            return APIResponse(data=result, message="Column added successfully")
+        
+        # Handle rename_column action
+        if body.action == 'rename_column' and body.column_name and body.new_name:
+            result = service.alter_table(
+                table_name=table_name,
+                rename_columns={body.column_name: body.new_name},
+                changed_by=current_user.username,
+            )
+            return APIResponse(data=result, message="Column renamed successfully")
+        
+        # Original alter table logic (batch operations)
         result = service.alter_table(
             table_name=table_name,
             add_columns=[c.model_dump() for c in body.add_columns] if body.add_columns else None,
@@ -98,6 +146,235 @@ async def delete_table(
 
 
 # ============================================================================
+# Export Settings API (static routes before dynamic)
+# ============================================================================
+
+@router.get("/export/settings", response_model=APIResponse)
+async def get_export_settings(
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    """Get all export settings."""
+    from app.models.audit import ExportSettings
+    settings = db.query(ExportSettings).all()
+    return APIResponse(data=[{
+        "key": s.setting_key,
+        "value": s.setting_value,
+        "description": s.description
+    } for s in settings])
+
+
+async def _update_export_settings_logic(settings: dict, db: Session):
+    """Update export settings logic."""
+    from app.models.audit import ExportSettings
+    
+    for key, value in settings.items():
+        setting = db.query(ExportSettings).filter(ExportSettings.setting_key == key).first()
+        if setting:
+            setting.setting_value = str(value) if not isinstance(value, str) else value
+        else:
+            db.add(ExportSettings(setting_key=key, setting_value=str(value)))
+    
+    db.commit()
+    return APIResponse(data=settings, message="Settings updated")
+
+
+@router.put("/export/settings", response_model=APIResponse)
+async def update_export_settings_put(
+    settings: dict,
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    """Update export settings (PUT)."""
+    return await _update_export_settings_logic(settings, db)
+
+
+@router.post("/export/settings", response_model=APIResponse)
+async def update_export_settings_post(
+    settings: dict,
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    """Update export settings (POST)."""
+    return await _update_export_settings_logic(settings, db)
+
+
+# ============================================================================
+# Table Permissions API (which tables can be edited/uploaded/exported)
+# ============================================================================
+
+@router.get("/permissions", response_model=APIResponse)
+async def list_table_permissions(
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    """Get all table permissions."""
+    from app.models.audit import TablePermission
+    perms = db.query(TablePermission).order_by(TablePermission.table_name).all()
+    return APIResponse(data=[{
+        "table_name": p.table_name,
+        "can_view": bool(p.can_view),
+        "can_edit": bool(p.can_edit),
+        "can_upload": bool(p.can_upload),
+        "can_export": bool(p.can_export),
+        "can_delete": bool(p.can_delete),
+    } for p in perms])
+
+
+@router.get("/permissions/allowed", response_model=APIResponse)
+async def get_allowed_tables(
+    action: str = Query(..., description="Action: view, edit, upload, export, delete"),
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    """Get list of tables allowed for a specific action."""
+    from app.models.audit import TablePermission
+    from sqlalchemy import text
+    
+    action_map = {
+        "view": "can_view",
+        "edit": "can_edit", 
+        "upload": "can_upload",
+        "export": "can_export",
+        "delete": "can_delete",
+    }
+    
+    if action not in action_map:
+        raise HTTPException(status_code=400, detail=f"Invalid action. Allowed: {list(action_map.keys())}")
+    
+    col = action_map[action]
+    perms = db.query(TablePermission).filter(getattr(TablePermission, col) == 1).all()
+    return APIResponse(data=[p.table_name for p in perms])
+
+
+@router.post("/permissions", response_model=APIResponse)
+async def save_table_permissions(
+    permissions: List[Dict[str, Any]] = Body(...),
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    """Save table permissions."""
+    from app.models.audit import TablePermission
+    from datetime import datetime
+    
+    for perm in permissions:
+        existing = db.query(TablePermission).filter(
+            TablePermission.table_name == perm["table_name"]
+        ).first()
+        
+        if existing:
+            existing.can_view = perm.get("can_view", True)
+            existing.can_edit = perm.get("can_edit", False)
+            existing.can_upload = perm.get("can_upload", False)
+            existing.can_export = perm.get("can_export", False)
+            existing.can_delete = perm.get("can_delete", False)
+            existing.updated_at = datetime.utcnow()
+        else:
+            db.add(TablePermission(
+                table_name=perm["table_name"],
+                can_view=perm.get("can_view", True),
+                can_edit=perm.get("can_edit", False),
+                can_upload=perm.get("can_upload", False),
+                can_export=perm.get("can_export", False),
+                can_delete=perm.get("can_delete", False),
+            ))
+    
+    db.commit()
+    return APIResponse(message="Permissions saved")
+
+
+# ============================================================================
+# Export Jobs API (background processing)
+# ============================================================================
+
+@router.get("/export/jobs", response_model=APIResponse)
+async def list_export_jobs(
+    limit: int = Query(20, le=100),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """List user's export jobs."""
+    from app.services.export_job_service import get_user_jobs
+    jobs = get_user_jobs(db, current_user.username, limit)
+    return APIResponse(data=jobs)
+
+
+@router.get("/export/jobs/{job_id}", response_model=APIResponse)
+async def get_export_job_status(
+    job_id: str,
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    """Get status of an export job."""
+    from app.services.export_job_service import get_job_status
+    status = get_job_status(db, job_id)
+    if not status:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return APIResponse(data=status)
+
+
+@router.get("/export/jobs/{job_id}/download")
+async def download_export_job(
+    job_id: str,
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    """Download completed export job file."""
+    from app.services.export_job_service import get_job_file
+    from fastapi.responses import FileResponse
+    
+    result = get_job_file(db, job_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="File not found or job not completed")
+    
+    filepath, filename = result
+    return FileResponse(
+        path=filepath,
+        filename=filename,
+        media_type='application/octet-stream'
+    )
+
+
+@router.delete("/export/jobs/{job_id}", response_model=APIResponse)
+async def delete_export_job(
+    job_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Delete an export job."""
+    from app.services.export_job_service import delete_job
+    success = delete_job(db, job_id, current_user.username)
+    if not success:
+        raise HTTPException(status_code=400, detail="Cannot delete job (not found or running)")
+    return APIResponse(message="Job deleted")
+
+
+@router.post("/export/jobs/start", response_model=APIResponse)
+async def start_export_job(
+    body: dict,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Start a background export job."""
+    from app.services.export_job_service import create_export_job
+    
+    table_name = body.get('table_name')
+    format = body.get('format', 'xlsx')
+    columns = body.get('columns', [])
+    filters = body.get('filters', {})
+    
+    if not table_name:
+        raise HTTPException(status_code=400, detail="table_name required")
+    
+    job = create_export_job(db, table_name, format, columns, filters, current_user.username)
+    return APIResponse(data={
+        'job_id': job.job_id,
+        'status': job.status,
+        'message': 'Export job started'
+    })
+
+
+# ============================================================================
 # Table Metadata & Schema
 # ============================================================================
 
@@ -105,18 +382,224 @@ async def delete_table(
 async def get_table_schema(
     table_name: str,
     db: Session = Depends(get_db),
-    _: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
 ):
-    """Get table schema and metadata."""
+    """Get table schema, metadata, and editable columns for current user."""
+    from app.security.dependencies import get_editable_columns
+    
     try:
         service = TableManagementService(db)
         result = service.get_table_metadata(table_name)
+        
+        # Add editable columns for current user
+        all_column_names = [c["column_name"] for c in result.get("columns", [])]
+        editable_columns = get_editable_columns(db, table_name, current_user.role_codes, all_column_names)
+        result["editable_columns"] = editable_columns
+        
+        # Mark columns as editable in the column list
+        for col in result.get("columns", []):
+            col["is_editable"] = col["column_name"] in editable_columns and not col.get("is_primary_key")
+        
         return APIResponse(data=result)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
 
 
-@router.get("/", response_model=APIResponse)
+@router.get("/{table_name}/row-count", response_model=APIResponse)
+async def get_table_row_count(
+    table_name: str,
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    """Get row count for a table (exact count using COUNT(*))."""
+    from app.database.session import get_data_engine
+    from sqlalchemy import text
+    
+    try:
+        engine = get_data_engine()
+        with engine.connect() as conn:
+            # Use COUNT(*) for accurate count - safe table name escaping
+            safe_table = table_name.replace("'", "''").replace("[", "").replace("]", "")
+            result = conn.execute(text(f"SELECT COUNT(*) FROM [{safe_table}]"))
+            row = result.fetchone()
+            count = row[0] if row else 0
+            
+        return APIResponse(data={"table_name": table_name, "row_count": count})
+    except Exception as e:
+        # Fallback: try approximate count from sys tables
+        try:
+            engine = get_data_engine()
+            with engine.connect() as conn:
+                result = conn.execute(text("""
+                    SELECT SUM(p.rows) as row_count
+                    FROM sys.tables t
+                    INNER JOIN sys.partitions p ON t.object_id = p.object_id
+                    WHERE t.name = :table_name AND p.index_id IN (0, 1)
+                """), {"table_name": table_name})
+                row = result.fetchone()
+                count = row[0] if row and row[0] else 0
+            return APIResponse(data={"table_name": table_name, "row_count": count})
+        except:
+            raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/{table_name}/settings", response_model=APIResponse)
+async def get_table_settings(
+    table_name: str,
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    """Get table-specific settings (heavy table config, etc.)."""
+    import json
+    try:
+        from app.models.rls import TableSettings
+        
+        settings = db.query(TableSettings).filter(TableSettings.table_name == table_name).first()
+        if settings:
+            filter_cols = []
+            if settings.filter_columns:
+                try:
+                    filter_cols = json.loads(settings.filter_columns)
+                except:
+                    pass
+            return APIResponse(data={
+                "table_name": table_name,
+                "is_heavy": settings.is_heavy,
+                "row_threshold": settings.row_threshold,
+                "require_filter": settings.require_filter,
+                "visible_in_editor": getattr(settings, 'visible_in_editor', True),
+                "filter_columns": filter_cols,
+            })
+        else:
+            return APIResponse(data={
+                "table_name": table_name,
+                "is_heavy": False,
+                "row_threshold": 100000,
+                "require_filter": False,
+                "visible_in_editor": True,
+                "filter_columns": [],
+            })
+    except Exception:
+        # If table_settings table doesn't exist, return defaults
+        return APIResponse(data={
+            "table_name": table_name,
+            "is_heavy": False,
+            "row_threshold": 100000,
+            "require_filter": False,
+            "visible_in_editor": True,
+            "filter_columns": [],
+        })
+
+
+@router.get("/{table_name}/distinct/{column_name}", response_model=APIResponse)
+async def get_distinct_values(
+    table_name: str,
+    column_name: str,
+    filters: str = Query(None, description="JSON encoded filter object for cascading (supports arrays for IN clause)"),
+    search: str = Query(None, description="Search term for the column values"),
+    limit: int = Query(200, ge=1, le=1000),
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    """
+    Get distinct values for a column with cascading filter support.
+    Supports multi-select filters (arrays become IN clauses).
+    Used for filter dropdowns in Data Editor.
+    """
+    import json
+    from app.database.session import get_data_engine
+    from sqlalchemy import text
+    
+    try:
+        engine = get_data_engine()
+        safe_table = table_name.replace("'", "''").replace("[", "").replace("]", "")
+        safe_column = column_name.replace("'", "''").replace("[", "").replace("]", "")
+        
+        # Build WHERE clause from existing filters (for cascading)
+        where_parts = ["1=1"]
+        params = {}
+        
+        if filters:
+            try:
+                filter_dict = json.loads(filters)
+                param_idx = 0
+                for col, filter_info in filter_dict.items():
+                    # Skip the current column (we're getting distinct for it)
+                    if col == column_name:
+                        continue
+                    
+                    safe_col = col.replace("'", "''").replace("[", "").replace("]", "")
+                    
+                    # Support array values (multi-select -> IN clause)
+                    if isinstance(filter_info, list) and len(filter_info) > 0:
+                        placeholders = []
+                        for val in filter_info:
+                            param_name = f"p{param_idx}"
+                            param_idx += 1
+                            placeholders.append(f":{param_name}")
+                            params[param_name] = val
+                        where_parts.append(f"[{safe_col}] IN ({', '.join(placeholders)})")
+                    elif isinstance(filter_info, dict):
+                        filter_type = filter_info.get("type", "equals")
+                        filter_val = filter_info.get("filter", "")
+                        # Support array in filter value
+                        if isinstance(filter_val, list) and len(filter_val) > 0:
+                            placeholders = []
+                            for val in filter_val:
+                                param_name = f"p{param_idx}"
+                                param_idx += 1
+                                placeholders.append(f":{param_name}")
+                                params[param_name] = val
+                            where_parts.append(f"[{safe_col}] IN ({', '.join(placeholders)})")
+                        elif filter_val:
+                            param_name = f"p{param_idx}"
+                            param_idx += 1
+                            
+                            if filter_type == "equals":
+                                where_parts.append(f"[{safe_col}] = :{param_name}")
+                                params[param_name] = filter_val
+                            elif filter_type == "contains":
+                                where_parts.append(f"[{safe_col}] LIKE :{param_name}")
+                                params[param_name] = f"%{filter_val}%"
+                            elif filter_type == "startsWith":
+                                where_parts.append(f"[{safe_col}] LIKE :{param_name}")
+                                params[param_name] = f"{filter_val}%"
+                            elif filter_type == "endsWith":
+                                where_parts.append(f"[{safe_col}] LIKE :{param_name}")
+                                params[param_name] = f"%{filter_val}"
+            except json.JSONDecodeError:
+                pass
+        
+        # Add search filter for the column itself (case-insensitive)
+        if search:
+            where_parts.append(f"LOWER(CAST([{safe_column}] AS NVARCHAR(MAX))) LIKE LOWER(:search)")
+            params["search"] = f"%{search}%"
+        
+        where_clause = " AND ".join(where_parts)
+        
+        # Query distinct values
+        sql = f"""
+            SELECT TOP {limit} [{safe_column}] as value, COUNT(*) as count
+            FROM [{safe_table}]
+            WHERE {where_clause} AND [{safe_column}] IS NOT NULL AND CAST([{safe_column}] AS NVARCHAR(MAX)) != ''
+            GROUP BY [{safe_column}]
+            ORDER BY COUNT(*) DESC
+        """
+        
+        with engine.connect() as conn:
+            result = conn.execute(text(sql), params)
+            values = [{"value": str(row[0]), "count": row[1]} for row in result.fetchall()]
+        
+        return APIResponse(data={
+            "column_name": column_name,
+            "values": values,
+            "has_more": len(values) >= limit
+        })
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("", response_model=APIResponse)
 async def list_tables(
     module: str = Query(None),
     include_system: bool = Query(False),
@@ -131,13 +614,154 @@ async def list_tables(
 
 @router.get("/database/all", response_model=APIResponse)
 async def list_all_database_tables(
+    visible_only: bool = Query(False, description="Only return tables marked as visible in editor"),
     db: Session = Depends(get_db),
     _: User = Depends(RequirePermissions(["TABLE_READ"])),
 ):
-    """List all tables from SQL Server (not just registered)."""
+    """List all tables from SQL Server (optionally filtered by visibility settings)."""
     service = TableManagementService(db)
     tables = service.list_all_database_tables()
+    
+    if visible_only:
+        # Filter by table_settings visibility
+        try:
+            from sqlalchemy import text
+            visible_tables_result = db.execute(text("""
+                SELECT table_name FROM table_settings WHERE visible_in_editor = 1
+            """)).fetchall()
+            visible_set = {row[0] for row in visible_tables_result}
+            
+            # If no settings exist for a table, it's visible by default
+            # So we only filter out tables explicitly marked as hidden
+            hidden_result = db.execute(text("""
+                SELECT table_name FROM table_settings WHERE visible_in_editor = 0
+            """)).fetchall()
+            hidden_set = {row[0] for row in hidden_result}
+            
+            tables = [t for t in tables if t not in hidden_set]
+        except Exception:
+            pass  # If table_settings doesn't exist, return all tables
+    
     return APIResponse(data=tables)
+
+
+@router.get("/settings/all", response_model=APIResponse)
+async def list_all_table_settings(
+    db: Session = Depends(get_db),
+    _: User = Depends(RequirePermissions(["SETTINGS_VIEW"])),
+):
+    """List all table settings for management UI."""
+    from sqlalchemy import text
+    from app.database.session import get_data_engine
+    
+    try:
+        # Get all tables from database
+        data_engine = get_data_engine()
+        with data_engine.connect() as conn:
+            result = conn.execute(text("""
+                SELECT t.name as table_name, 
+                       SUM(p.rows) as row_count
+                FROM sys.tables t
+                LEFT JOIN sys.partitions p ON t.object_id = p.object_id AND p.index_id IN (0, 1)
+                WHERE t.type = 'U'
+                GROUP BY t.name
+                ORDER BY t.name
+            """))
+            all_tables = {row[0]: row[1] or 0 for row in result.fetchall()}
+        
+        # Get existing settings
+        settings_result = db.execute(text("""
+            SELECT table_name, is_heavy, row_threshold, require_filter, 
+                   ISNULL(visible_in_editor, 1) as visible_in_editor, 
+                   filter_columns
+            FROM table_settings
+        """)).fetchall()
+        
+        settings_map = {}
+        for row in settings_result:
+            settings_map[row[0]] = {
+                "is_heavy": row[1],
+                "row_threshold": row[2],
+                "require_filter": row[3],
+                "visible_in_editor": row[4],
+                "filter_columns": row[5],
+            }
+        
+        # Combine
+        result_list = []
+        for table_name, row_count in all_tables.items():
+            setting = settings_map.get(table_name, {
+                "is_heavy": False,
+                "row_threshold": 100000,
+                "require_filter": False,
+                "visible_in_editor": True,
+                "filter_columns": None,
+            })
+            result_list.append({
+                "table_name": table_name,
+                "row_count": row_count,
+                **setting
+            })
+        
+        return APIResponse(data=result_list)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put("/settings/{table_name}", response_model=APIResponse)
+async def update_table_settings(
+    table_name: str,
+    visible_in_editor: bool = Query(None),
+    is_heavy: bool = Query(None),
+    filter_columns: str = Query(None, description="JSON array of column names"),
+    db: Session = Depends(get_db),
+    _: User = Depends(RequirePermissions(["SETTINGS_EDIT"])),
+):
+    """Update settings for a specific table (visibility, filter columns, etc)."""
+    from sqlalchemy import text
+    
+    try:
+        # Check if settings exist
+        existing = db.execute(text(
+            "SELECT id FROM table_settings WHERE table_name = :name"
+        ), {"name": table_name}).fetchone()
+        
+        if existing:
+            # Update
+            updates = []
+            params = {"name": table_name}
+            
+            if visible_in_editor is not None:
+                updates.append("visible_in_editor = :visible")
+                params["visible"] = visible_in_editor
+            if is_heavy is not None:
+                updates.append("is_heavy = :heavy")
+                params["heavy"] = is_heavy
+            if filter_columns is not None:
+                updates.append("filter_columns = :filters")
+                params["filters"] = filter_columns
+            
+            if updates:
+                updates.append("updated_at = GETDATE()")
+                sql = f"UPDATE table_settings SET {', '.join(updates)} WHERE table_name = :name"
+                db.execute(text(sql), params)
+                db.commit()
+        else:
+            # Insert new settings
+            db.execute(text("""
+                INSERT INTO table_settings (table_name, visible_in_editor, is_heavy, filter_columns, created_at, updated_at)
+                VALUES (:name, :visible, :heavy, :filters, GETDATE(), GETDATE())
+            """), {
+                "name": table_name,
+                "visible": visible_in_editor if visible_in_editor is not None else True,
+                "heavy": is_heavy if is_heavy is not None else False,
+                "filters": filter_columns
+            })
+            db.commit()
+        
+        return APIResponse(data={"table_name": table_name, "updated": True})
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ============================================================================
@@ -151,11 +775,21 @@ async def query_table_data(
     page_size: int = Query(50, ge=1, le=5000),
     order_by: str = Query(None),
     order_dir: str = Query("ASC"),
+    filters: str = Query(None, description="JSON encoded filter object"),
     db: Session = Depends(get_db),
     _: User = Depends(get_current_user),
 ):
     """Query paginated data from any table (for data grid)."""
+    import json
     try:
+        # Parse filters from JSON string
+        filter_dict = None
+        if filters:
+            try:
+                filter_dict = json.loads(filters)
+            except:
+                filter_dict = None
+        
         service = TableManagementService(db)
         result = service.query_table_data(
             table_name=table_name,
@@ -163,6 +797,7 @@ async def query_table_data(
             page_size=page_size,
             order_by=order_by,
             order_dir=order_dir,
+            filters=filter_dict,
         )
         return APIResponse(data=result)
     except ValueError as e:
@@ -186,3 +821,208 @@ async def truncate_table_data(
         return APIResponse(data=result, message="Table data deleted")
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+# ============================================================================
+# Export Table Data
+# ============================================================================
+
+def _build_export_where_clause(filter_dict):
+    """Build WHERE clause and params from filter dict."""
+    where_clause = ""
+    params = {}
+    param_idx = 0
+    
+    if not filter_dict:
+        return where_clause, params
+    
+    conditions = []
+    for col, val in filter_dict.items():
+        safe_col = col.replace("'", "''").replace("[", "").replace("]", "")
+        
+        if isinstance(val, dict):
+            filter_type = val.get('type', 'contains')
+            filter_val = val.get('filter', '')
+            
+            if filter_type == 'in':
+                if isinstance(filter_val, list) and len(filter_val) > 0:
+                    placeholders = []
+                    for v in filter_val:
+                        param_name = f"f{param_idx}"
+                        param_idx += 1
+                        placeholders.append(f":{param_name}")
+                        params[param_name] = v
+                    conditions.append(f"[{safe_col}] IN ({', '.join(placeholders)})")
+                continue
+            
+            if filter_type == 'between':
+                from_val = val.get('from')
+                to_val = val.get('to')
+                if from_val is not None and to_val is not None:
+                    param_from = f"f{param_idx}"
+                    param_to = f"f{param_idx + 1}"
+                    param_idx += 2
+                    params[param_from] = from_val
+                    params[param_to] = to_val
+                    conditions.append(f"[{safe_col}] BETWEEN :{param_from} AND :{param_to}")
+                continue
+            
+            if filter_type == 'blank':
+                conditions.append(f"([{safe_col}] IS NULL OR [{safe_col}] = '')")
+                continue
+            elif filter_type == 'notBlank':
+                conditions.append(f"([{safe_col}] IS NOT NULL AND [{safe_col}] != '')")
+                continue
+            
+            if not filter_val and filter_val != 0:
+                continue
+            
+            param_name = f"f{param_idx}"
+            param_idx += 1
+            
+            if filter_type == 'contains':
+                conditions.append(f"[{safe_col}] LIKE :{param_name}")
+                params[param_name] = f"%{filter_val}%"
+            elif filter_type == 'equals':
+                conditions.append(f"[{safe_col}] = :{param_name}")
+                params[param_name] = filter_val
+            elif filter_type == 'startsWith':
+                conditions.append(f"[{safe_col}] LIKE :{param_name}")
+                params[param_name] = f"{filter_val}%"
+            elif filter_type == 'endsWith':
+                conditions.append(f"[{safe_col}] LIKE :{param_name}")
+                params[param_name] = f"%{filter_val}"
+            elif filter_type == 'greaterThan':
+                conditions.append(f"[{safe_col}] > :{param_name}")
+                params[param_name] = filter_val
+            elif filter_type == 'lessThan':
+                conditions.append(f"[{safe_col}] < :{param_name}")
+                params[param_name] = filter_val
+        else:
+            param_name = f"f{param_idx}"
+            param_idx += 1
+            conditions.append(f"[{safe_col}] = :{param_name}")
+            params[param_name] = val
+    
+    if conditions:
+        where_clause = "WHERE " + " AND ".join(conditions)
+    
+    return where_clause, params
+
+
+@router.get("/{table_name}/export")
+async def export_table_data(
+    table_name: str,
+    format: str = Query("xlsx", pattern="^(xlsx|csv)$"),
+    columns: str = Query(None, description="Comma-separated column names"),
+    filters: str = Query(None, description="JSON encoded filter object"),
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    """Export table data to Excel or CSV with auto-split based on settings."""
+    import pandas as pd
+    import json
+    import zipfile
+    from sqlalchemy import text
+    from app.database.session import get_data_engine
+    from app.models.audit import ExportSettings
+    
+    try:
+        # Load export settings
+        settings_rows = db.query(ExportSettings).all()
+        settings = {s.setting_key: s.setting_value for s in settings_rows}
+        max_rows = int(settings.get('max_rows_per_file', 100000))
+        auto_split = settings.get('enable_auto_split', 'true').lower() == 'true'
+        
+        # Parse filters
+        filter_dict = None
+        if filters:
+            try:
+                filter_dict = json.loads(filters)
+            except:
+                filter_dict = None
+        
+        data_engine = get_data_engine()
+        
+        # Column selection
+        col_list = "*"
+        if columns:
+            selected_cols = [c.strip() for c in columns.split(",") if c.strip()]
+            if selected_cols:
+                col_list = ", ".join([f"[{c}]" for c in selected_cols])
+        
+        # Build WHERE clause
+        where_clause, params = _build_export_where_clause(filter_dict)
+        
+        # Get total count first
+        count_query = f"SELECT COUNT(*) FROM [{table_name}] {where_clause}"
+        with data_engine.connect() as conn:
+            total_rows = conn.execute(text(count_query), params).scalar()
+        
+        # Decide if we need to split
+        need_split = auto_split and total_rows > max_rows
+        
+        if not need_split:
+            # Single file export
+            query = f"SELECT {col_list} FROM [{table_name}] {where_clause}"
+            with data_engine.connect() as conn:
+                df = pd.read_sql(text(query), conn, params=params)
+            
+            output = io.BytesIO()
+            if format == "xlsx":
+                with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                    df.to_excel(writer, index=False, sheet_name=table_name[:31])
+                output.seek(0)
+                media_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                filename = f"{table_name}.xlsx"
+            else:
+                df.to_csv(output, index=False)
+                output.seek(0)
+                media_type = "text/csv"
+                filename = f"{table_name}.csv"
+            
+            return StreamingResponse(
+                output,
+                media_type=media_type,
+                headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+            )
+        
+        # Split export - create ZIP with multiple files
+        zip_buffer = io.BytesIO()
+        num_files = (total_rows + max_rows - 1) // max_rows
+        
+        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
+            for part in range(num_files):
+                offset = part * max_rows
+                
+                # Use OFFSET/FETCH for pagination (SQL Server 2012+)
+                paginated_query = f"""
+                    SELECT {col_list} FROM [{table_name}] {where_clause}
+                    ORDER BY (SELECT NULL)
+                    OFFSET {offset} ROWS FETCH NEXT {max_rows} ROWS ONLY
+                """
+                
+                with data_engine.connect() as conn:
+                    df_part = pd.read_sql(text(paginated_query), conn, params=params)
+                
+                part_buffer = io.BytesIO()
+                part_num = part + 1
+                
+                if format == "xlsx":
+                    with pd.ExcelWriter(part_buffer, engine='openpyxl') as writer:
+                        df_part.to_excel(writer, index=False, sheet_name=table_name[:31])
+                    part_buffer.seek(0)
+                    zf.writestr(f"{table_name}_part{part_num}.xlsx", part_buffer.getvalue())
+                else:
+                    df_part.to_csv(part_buffer, index=False)
+                    part_buffer.seek(0)
+                    zf.writestr(f"{table_name}_part{part_num}.csv", part_buffer.getvalue())
+        
+        zip_buffer.seek(0)
+        return StreamingResponse(
+            zip_buffer,
+            media_type="application/zip",
+            headers={"Content-Disposition": f'attachment; filename="{table_name}_export.zip"'}
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Export failed: {str(e)}")

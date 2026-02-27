@@ -1,5 +1,8 @@
 """
-Database Engine & Session Management for SQL Server (ODBC Driver 18)
+Database Engine & Session Management for SQL Server
+Dual Database Setup:
+- System DB (Claude): RBAC, RLS, Audit, Table Metadata
+- Data DB (Rep_data): Business data, dynamic tables, allocations
 """
 from sqlalchemy import create_engine, event, text
 from sqlalchemy.orm import sessionmaker, Session, DeclarativeBase
@@ -13,45 +16,92 @@ settings = get_settings()
 
 
 # ============================================================================
-# SQLAlchemy Engine with Connection Pooling
+# System Database Engine (Claude) - RBAC, RLS, Audit
 # ============================================================================
-engine = create_engine(
+system_engine = create_engine(
     settings.DATABASE_URL,
     poolclass=QueuePool,
     pool_size=settings.DB_POOL_SIZE,
     max_overflow=settings.DB_MAX_OVERFLOW,
     pool_timeout=settings.DB_POOL_TIMEOUT,
     pool_recycle=settings.DB_POOL_RECYCLE,
-    pool_pre_ping=True,  # verify connections before use
+    pool_pre_ping=True,
     echo=settings.DEBUG,
-    fast_executemany=True,  # critical for bulk inserts with pyodbc
+    fast_executemany=True,
+)
+
+# Alias for backward compatibility
+engine = system_engine
+
+
+# ============================================================================
+# Data Database Engine (Rep_data) - Business Data
+# ============================================================================
+data_engine = create_engine(
+    settings.DATA_DATABASE_URL,
+    poolclass=QueuePool,
+    pool_size=settings.DB_POOL_SIZE,
+    max_overflow=settings.DB_MAX_OVERFLOW,
+    pool_timeout=settings.DB_POOL_TIMEOUT,
+    pool_recycle=settings.DB_POOL_RECYCLE,
+    pool_pre_ping=True,
+    echo=settings.DEBUG,
+    fast_executemany=True,
 )
 
 
 # ============================================================================
-# Session Factory
+# Session Factories
 # ============================================================================
-SessionLocal = sessionmaker(
-    bind=engine,
+SystemSessionLocal = sessionmaker(
+    bind=system_engine,
     autocommit=False,
     autoflush=False,
     expire_on_commit=False,
 )
 
+DataSessionLocal = sessionmaker(
+    bind=data_engine,
+    autocommit=False,
+    autoflush=False,
+    expire_on_commit=False,
+)
+
+# Alias for backward compatibility
+SessionLocal = SystemSessionLocal
+
 
 # ============================================================================
-# Declarative Base
+# Declarative Bases
 # ============================================================================
 class Base(DeclarativeBase):
+    """Base for system tables (RBAC, RLS, Audit)."""
+    pass
+
+
+class DataBase(DeclarativeBase):
+    """Base for data tables (business data)."""
     pass
 
 
 # ============================================================================
-# Dependency: Get DB Session (for FastAPI)
+# Dependencies: Get DB Sessions (for FastAPI)
 # ============================================================================
 def get_db() -> Generator[Session, None, None]:
-    """FastAPI dependency that provides a database session per request."""
-    db = SessionLocal()
+    """FastAPI dependency for System DB (RBAC, RLS, Audit)."""
+    db = SystemSessionLocal()
+    try:
+        yield db
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+def get_data_db() -> Generator[Session, None, None]:
+    """FastAPI dependency for Data DB (business data, dynamic tables)."""
+    db = DataSessionLocal()
     try:
         yield db
     except Exception:
@@ -62,43 +112,80 @@ def get_db() -> Generator[Session, None, None]:
 
 
 # ============================================================================
-# Raw Connection Helper (for Pandas / bulk ops)
+# Raw Connection Helpers (for Pandas / bulk ops)
 # ============================================================================
 def get_raw_connection():
-    """Get a raw DBAPI connection for Pandas read_sql / to_sql operations."""
-    return engine.raw_connection()
+    """Get a raw DBAPI connection for System DB."""
+    return system_engine.raw_connection()
+
+
+def get_data_raw_connection():
+    """Get a raw DBAPI connection for Data DB."""
+    return data_engine.raw_connection()
 
 
 def get_engine():
-    """Get the SQLAlchemy engine instance."""
-    return engine
+    """Get the System DB SQLAlchemy engine."""
+    return system_engine
+
+
+def get_system_engine():
+    """Get the System DB SQLAlchemy engine (alias for get_engine)."""
+    return system_engine
+
+
+def get_data_engine():
+    """Get the Data DB SQLAlchemy engine."""
+    return data_engine
 
 
 # ============================================================================
-# Health Check
+# Health Checks
 # ============================================================================
 def check_db_connection() -> bool:
-    """Verify database connectivity."""
+    """Verify System DB connectivity."""
     try:
-        with engine.connect() as conn:
+        with system_engine.connect() as conn:
             conn.execute(text("SELECT 1"))
         return True
     except Exception as e:
-        logger.error(f"Database connection failed: {e}")
+        logger.error(f"System DB connection failed: {e}")
+        return False
+
+
+def check_data_db_connection() -> bool:
+    """Verify Data DB connectivity."""
+    try:
+        with data_engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        return True
+    except Exception as e:
+        logger.error(f"Data DB connection failed: {e}")
         return False
 
 
 # ============================================================================
 # Event Listeners
 # ============================================================================
-@event.listens_for(engine, "connect")
-def set_connection_options(dbapi_connection, connection_record):
-    """Set connection-level options after connect."""
-    # Enable MARS for multiple active result sets
+@event.listens_for(system_engine, "connect")
+def set_system_connection_options(dbapi_connection, connection_record):
+    """Set connection-level options for system DB."""
     pass
 
 
-@event.listens_for(engine, "checkout")
-def checkout_listener(dbapi_connection, connection_record, connection_proxy):
-    """Log when connection is checked out from pool."""
-    logger.debug("Connection checked out from pool")
+@event.listens_for(data_engine, "connect")
+def set_data_connection_options(dbapi_connection, connection_record):
+    """Set connection-level options for data DB."""
+    pass
+
+
+@event.listens_for(system_engine, "checkout")
+def system_checkout_listener(dbapi_connection, connection_record, connection_proxy):
+    """Log when system connection is checked out."""
+    logger.debug("System DB connection checked out from pool")
+
+
+@event.listens_for(data_engine, "checkout")
+def data_checkout_listener(dbapi_connection, connection_record, connection_proxy):
+    """Log when data connection is checked out."""
+    logger.debug("Data DB connection checked out from pool")

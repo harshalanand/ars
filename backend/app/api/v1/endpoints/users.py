@@ -3,6 +3,7 @@ User Management API Endpoints
 """
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
+from typing import Optional
 
 from app.database.session import get_db
 from app.schemas.auth import UserCreate, UserUpdate, UserResponse, UserListResponse
@@ -15,7 +16,7 @@ router = APIRouter(prefix="/users", tags=["User Management"])
 
 
 @router.post(
-    "/",
+    "",
     response_model=APIResponse,
     dependencies=[Depends(RequirePermissions(["ADMIN_USERS_CREATE"]))],
 )
@@ -33,18 +34,24 @@ async def create_user(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
 
+
 @router.get(
-    "/",
+    "",
     response_model=APIResponse,
     dependencies=[Depends(RequirePermissions(["ADMIN_USERS_READ"]))],
 )
 async def list_users(
-    page: int = Query(1, ge=1),
-    page_size: int = Query(50, ge=1, le=200),
-    search: str = Query(None),
+    page: Optional[int] = Query(None, ge=1, description="Page number (optional)"),
+    page_size: Optional[int] = Query(None, ge=1, le=1000),
+    search: Optional[str] = Query(None),
     db: Session = Depends(get_db),
 ):
-    """List all users with pagination and search."""
+    """List all users with pagination and search. Accepts page and page_size as optional query params."""
+    # Default values if missing or empty
+    if page is None:
+        page = 1
+    if page_size is None:
+        page_size = 50
     service = AuthService(db)
     result = service.list_users(page=page, page_size=page_size, search=search)
     return APIResponse(data=result)

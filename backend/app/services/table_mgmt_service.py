@@ -13,7 +13,7 @@ from loguru import logger
 
 from app.models.table_mgmt import TableRegistry, ColumnRegistry
 from app.audit.service import AuditService
-from app.database.session import get_engine
+from app.database.session import get_engine, get_data_engine
 
 
 # Allowed SQL data types (whitelist to prevent injection)
@@ -37,8 +37,9 @@ class TableManagementService:
     """Manages dynamic table creation, alteration, and metadata."""
 
     def __init__(self, db: Session):
-        self.db = db
-        self.engine = get_engine()
+        self.db = db  # System DB for metadata/registry
+        self.engine = get_engine()  # System DB engine (for reference)
+        self.data_engine = get_data_engine()  # Data DB engine (for DDL)
         self.audit = AuditService(db)
 
     # ========================================================================
@@ -89,7 +90,7 @@ class TableManagementService:
         create_sql = f"CREATE TABLE [{table_name}] (\n  {','.join(col_defs)}\n)"
 
         try:
-            with self.engine.connect() as conn:
+            with self.data_engine.connect() as conn:
                 conn.execute(text(create_sql))
                 conn.commit()
         except Exception as e:
@@ -185,7 +186,7 @@ class TableManagementService:
                 col_sql = self._build_column_sql(col)
                 alter_sql = f"ALTER TABLE [{table_name}] ADD {col_sql}"
                 try:
-                    with self.engine.connect() as conn:
+                    with self.data_engine.connect() as conn:
                         conn.execute(text(alter_sql))
                         conn.commit()
                 except Exception as e:
@@ -215,7 +216,7 @@ class TableManagementService:
 
                 alter_sql = f"ALTER TABLE [{table_name}] DROP COLUMN [{col_name}]"
                 try:
-                    with self.engine.connect() as conn:
+                    with self.data_engine.connect() as conn:
                         conn.execute(text(alter_sql))
                         conn.commit()
                 except Exception as e:
@@ -235,7 +236,7 @@ class TableManagementService:
             for old_name, new_name in rename_columns.items():
                 rename_sql = f"EXEC sp_rename '[{table_name}].[{old_name}]', '{new_name}', 'COLUMN'"
                 try:
-                    with self.engine.connect() as conn:
+                    with self.data_engine.connect() as conn:
                         conn.execute(text(rename_sql))
                         conn.commit()
                 except Exception as e:
@@ -262,34 +263,168 @@ class TableManagementService:
         return {"table_name": table_name, "changes": changes}
 
     # ========================================================================
-    # SOFT DELETE TABLE
+    # ALTER COLUMN TYPE
     # ========================================================================
 
-    def soft_delete_table(self, table_name: str, deleted_by: str) -> Dict[str, Any]:
-        """Soft-delete a table (mark inactive, do NOT drop from SQL Server)."""
+    def alter_column_type(
+        self,
+        table_name: str,
+        column_name: str,
+        new_type: str,
+        changed_by: str = "system",
+    ) -> Dict[str, Any]:
+        """
+        Alter the data type of an existing column.
+        Handles primary key constraints by temporarily dropping and recreating them.
+        """
         if table_name.lower() in PROTECTED_TABLES:
-            raise ValueError(f"Cannot delete protected table: {table_name}")
+            raise ValueError(f"Cannot alter protected table: {table_name}")
 
+        # Verify table exists
         registry = self.db.query(TableRegistry).filter(
             TableRegistry.table_name == table_name, TableRegistry.is_active == True
         ).first()
         if not registry:
-            raise ValueError(f"Table '{table_name}' not found")
+            raise ValueError(f"Table '{table_name}' not found in registry")
 
-        if registry.is_system_table:
-            raise ValueError(f"Cannot delete system table: {table_name}")
+        try:
+            with self.data_engine.connect() as conn:
+                # Check if column is part of a primary key constraint
+                pk_check_sql = text("""
+                    SELECT kc.name AS constraint_name, 
+                           STRING_AGG(c.name, ',') WITHIN GROUP (ORDER BY ic.key_ordinal) AS pk_columns
+                    FROM sys.key_constraints kc
+                    INNER JOIN sys.index_columns ic ON kc.parent_object_id = ic.object_id AND kc.unique_index_id = ic.index_id
+                    INNER JOIN sys.columns c ON ic.object_id = c.object_id AND ic.column_id = c.column_id
+                    WHERE kc.type = 'PK' 
+                      AND OBJECT_NAME(kc.parent_object_id) = :table_name
+                    GROUP BY kc.name
+                    HAVING SUM(CASE WHEN c.name = :column_name THEN 1 ELSE 0 END) > 0
+                """)
+                pk_result = conn.execute(pk_check_sql, {"table_name": table_name, "column_name": column_name}).fetchone()
+                
+                pk_constraint_name = None
+                pk_columns = []
+                
+                if pk_result:
+                    pk_constraint_name = pk_result[0]
+                    pk_columns = pk_result[1].split(',')
+                    
+                    # Drop the primary key constraint
+                    drop_pk_sql = f"ALTER TABLE [{table_name}] DROP CONSTRAINT [{pk_constraint_name}]"
+                    conn.execute(text(drop_pk_sql))
+                    conn.commit()
+                
+                # Execute ALTER COLUMN SQL
+                alter_sql = f"ALTER TABLE [{table_name}] ALTER COLUMN [{column_name}] {new_type}"
+                conn.execute(text(alter_sql))
+                conn.commit()
+                
+                # Recreate primary key if it was dropped
+                if pk_constraint_name and pk_columns:
+                    pk_cols_str = ", ".join([f"[{c}]" for c in pk_columns])
+                    create_pk_sql = f"ALTER TABLE [{table_name}] ADD CONSTRAINT [{pk_constraint_name}] PRIMARY KEY ({pk_cols_str})"
+                    conn.execute(text(create_pk_sql))
+                    conn.commit()
+                    
+        except Exception as e:
+            raise ValueError(f"Failed to alter column '{column_name}': {e}")
 
-        registry.is_active = False
+        # Update column registry (extract base type from new_type like 'NVARCHAR(255)')
+        base_type = new_type.split('(')[0].upper()
+        max_length = None
+        if '(' in new_type and ')' in new_type:
+            try:
+                length_part = new_type.split('(')[1].split(')')[0]
+                if ',' not in length_part:  # Simple length, not precision/scale
+                    max_length = int(length_part)
+            except:
+                pass
 
+        col_reg = self.db.query(ColumnRegistry).filter(
+            ColumnRegistry.table_id == registry.id,
+            ColumnRegistry.column_name == column_name,
+        ).first()
+        if col_reg:
+            col_reg.data_type = base_type
+            if max_length:
+                col_reg.max_length = max_length
+
+        # Audit
         self.audit.log_schema_change(
             table_name=table_name,
-            changed_by=deleted_by,
-            action="SOFT_DELETE_TABLE",
-            details={"table_name": table_name},
+            changed_by=changed_by,
+            action="ALTER_COLUMN",
+            details={"column": column_name, "new_type": new_type},
         )
         self.db.commit()
 
-        return {"table_name": table_name, "status": "soft_deleted"}
+        return {"table_name": table_name, "column": column_name, "new_type": new_type}
+
+    # ========================================================================
+    # SOFT DELETE TABLE
+    # ========================================================================
+
+    def soft_delete_table(self, table_name: str, deleted_by: str) -> Dict[str, Any]:
+        """Soft-delete a table (mark inactive in registry). If not registered, actually DROP from SQL Server."""
+        if table_name.lower() in PROTECTED_TABLES:
+            raise ValueError(f"Cannot delete protected table: {table_name}")
+
+        # Try exact match first
+        registry = self.db.query(TableRegistry).filter(
+            TableRegistry.table_name == table_name, TableRegistry.is_active == True
+        ).first()
+        
+        # If not found, try case-insensitive match
+        if not registry:
+            registry = self.db.query(TableRegistry).filter(
+                TableRegistry.table_name.ilike(table_name), TableRegistry.is_active == True
+            ).first()
+        
+        if registry:
+            # Table is registered - soft delete (mark inactive)
+            if registry.is_system_table:
+                raise ValueError(f"Cannot delete system table: {table_name}")
+
+            registry.is_active = False
+
+            self.audit.log_schema_change(
+                table_name=table_name,
+                changed_by=deleted_by,
+                action="SOFT_DELETE_TABLE",
+                details={"table_name": table_name},
+            )
+            self.db.commit()
+
+            return {"table_name": table_name, "status": "soft_deleted"}
+        else:
+            # Table not in registry - check if it exists in SQL Server and DROP it
+            with self.data_engine.connect() as conn:
+                check_sql = text("""
+                    SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES 
+                    WHERE TABLE_NAME = :table_name AND TABLE_TYPE = 'BASE TABLE'
+                """)
+                result = conn.execute(check_sql, {"table_name": table_name}).fetchone()
+                
+                if not result:
+                    raise ValueError(f"Table '{table_name}' not found in registry or database")
+                
+                # Table exists in SQL Server but not registered - DROP it
+                drop_sql = text(f"DROP TABLE [{table_name}]")
+                conn.execute(drop_sql)
+                conn.commit()
+                
+                self.audit.log_schema_change(
+                    table_name=table_name,
+                    changed_by=deleted_by,
+                    action="DROP_TABLE",
+                    details={"table_name": table_name, "note": "Unregistered table dropped"},
+                )
+                self.db.commit()
+                
+                logger.info(f"Table '{table_name}' (unregistered) dropped from SQL Server by {deleted_by}")
+                
+                return {"table_name": table_name, "status": "dropped"}
 
     # ========================================================================
     # TABLE METADATA & SCHEMA VIEWER
@@ -325,7 +460,7 @@ class TableManagementService:
             ORDER BY c.ORDINAL_POSITION
         """)
 
-        with self.engine.connect() as conn:
+        with self.data_engine.connect() as conn:
             result = conn.execute(sql, {"table_name": table_name})
             columns = []
             for row in result:
@@ -354,7 +489,7 @@ class TableManagementService:
 
         # Get row count
         count_sql = text(f"SELECT COUNT(*) FROM [{table_name}]")
-        with self.engine.connect() as conn:
+        with self.data_engine.connect() as conn:
             row_count = conn.execute(count_sql).scalar()
 
         return {
@@ -405,7 +540,7 @@ class TableManagementService:
             WHERE t.TABLE_TYPE = 'BASE TABLE'
             ORDER BY t.TABLE_NAME
         """)
-        with self.engine.connect() as conn:
+        with self.data_engine.connect() as conn:
             result = conn.execute(sql)
             return [{"table_name": row[0], "row_count": row[1] or 0} for row in result]
 
@@ -432,7 +567,7 @@ class TableManagementService:
             SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES
             WHERE TABLE_NAME = :table_name
         """)
-        with self.engine.connect() as conn:
+        with self.data_engine.connect() as conn:
             exists = conn.execute(check_sql, {"table_name": table_name}).scalar()
         if not exists:
             raise ValueError(f"Table '{table_name}' not found")
@@ -440,27 +575,83 @@ class TableManagementService:
         # Build SELECT
         col_list = ", ".join([f"[{c}]" for c in columns]) if columns else "*"
 
-        # Build WHERE
+        # Build WHERE from filters
+        # Supports AG-Grid filter model format: {column: {type: 'contains', filter: 'value'}}
+        # Also supports 'in' type for multi-select: {column: {type: 'in', filter: ['val1', 'val2']}}
+        # Or simple format: {column: 'value'}
         where_clause = ""
         params = {}
+        param_idx = 0
         if filters:
             conditions = []
-            for idx, (col, val) in enumerate(filters.items()):
-                param_name = f"f{idx}"
-                if isinstance(val, str) and "%" in val:
-                    conditions.append(f"[{col}] LIKE :{param_name}")
-                elif val is None:
-                    conditions.append(f"[{col}] IS NULL")
-                    continue
+            for col, val in filters.items():
+                safe_col = col.replace("'", "''").replace("[", "").replace("]", "")
+                
+                # Handle AG-Grid filter model format
+                if isinstance(val, dict):
+                    filter_type = val.get('type', 'contains')
+                    filter_val = val.get('filter', '')
+                    
+                    # Handle 'in' filter type for multi-select
+                    if filter_type == 'in':
+                        if isinstance(filter_val, list) and len(filter_val) > 0:
+                            placeholders = []
+                            for v in filter_val:
+                                param_name = f"f{param_idx}"
+                                param_idx += 1
+                                placeholders.append(f":{param_name}")
+                                params[param_name] = v
+                            conditions.append(f"[{safe_col}] IN ({', '.join(placeholders)})")
+                        continue
+                    
+                    if not filter_val and filter_val != 0:
+                        continue
+                    
+                    param_name = f"f{param_idx}"
+                    param_idx += 1
+                    
+                    if filter_type == 'contains':
+                        conditions.append(f"[{safe_col}] LIKE :{param_name}")
+                        params[param_name] = f"%{filter_val}%"
+                    elif filter_type == 'equals':
+                        conditions.append(f"[{safe_col}] = :{param_name}")
+                        params[param_name] = filter_val
+                    elif filter_type == 'startsWith':
+                        conditions.append(f"[{safe_col}] LIKE :{param_name}")
+                        params[param_name] = f"{filter_val}%"
+                    elif filter_type == 'endsWith':
+                        conditions.append(f"[{safe_col}] LIKE :{param_name}")
+                        params[param_name] = f"%{filter_val}"
+                    elif filter_type == 'notEqual':
+                        conditions.append(f"[{safe_col}] != :{param_name}")
+                        params[param_name] = filter_val
+                    elif filter_type == 'blank':
+                        conditions.append(f"([{safe_col}] IS NULL OR [{safe_col}] = '')")
+                    elif filter_type == 'notBlank':
+                        conditions.append(f"([{safe_col}] IS NOT NULL AND [{safe_col}] != '')")
+                    else:
+                        # Default to contains
+                        conditions.append(f"[{safe_col}] LIKE :{param_name}")
+                        params[param_name] = f"%{filter_val}%"
                 else:
-                    conditions.append(f"[{col}] = :{param_name}")
-                params[param_name] = val
+                    # Simple value filter
+                    param_name = f"f{param_idx}"
+                    param_idx += 1
+                    if isinstance(val, str) and "%" in val:
+                        conditions.append(f"[{safe_col}] LIKE :{param_name}")
+                        params[param_name] = val
+                    elif val is None:
+                        conditions.append(f"[{safe_col}] IS NULL")
+                    else:
+                        conditions.append(f"CAST([{safe_col}] AS NVARCHAR) LIKE :{param_name}")
+                        params[param_name] = f"%{val}%"
+            
             if conditions:
                 where_clause = "WHERE " + " AND ".join(conditions)
 
         # Count total
         count_sql = text(f"SELECT COUNT(*) FROM [{table_name}] {where_clause}")
-        with self.engine.connect() as conn:
+        with self.data_engine.connect() as conn:
             total = conn.execute(count_sql, params).scalar()
 
         # Order
@@ -482,7 +673,7 @@ class TableManagementService:
         params["offset"] = offset
         params["page_size"] = page_size
 
-        with self.engine.connect() as conn:
+        with self.data_engine.connect() as conn:
             result = conn.execute(data_sql, params)
             col_names = list(result.keys())
             rows = [dict(zip(col_names, row)) for row in result]
@@ -508,12 +699,12 @@ class TableManagementService:
 
         # Get row count before truncate
         count_sql = text(f"SELECT COUNT(*) FROM [{table_name}]")
-        with self.engine.connect() as conn:
+        with self.data_engine.connect() as conn:
             row_count = conn.execute(count_sql).scalar()
 
         # Use DELETE instead of TRUNCATE to avoid FK issues
         delete_sql = text(f"DELETE FROM [{table_name}]")
-        with self.engine.connect() as conn:
+        with self.data_engine.connect() as conn:
             conn.execute(delete_sql)
             conn.commit()
 

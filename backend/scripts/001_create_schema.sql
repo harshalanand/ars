@@ -1,10 +1,10 @@
 -- ============================================================================
 -- RETAIL LISTING & ALLOCATION SYSTEM - DATABASE SCHEMA
 -- Target: Microsoft SQL Server (ODBC Driver 18)
--- Database: Rep_data
+-- Database: Claude
 -- ============================================================================
 
-USE Rep_data;
+USE Claude;
 GO
 
 -- ============================================================================

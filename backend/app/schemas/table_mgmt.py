@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field
 # ============================================================================
 
 class ColumnDefinition(BaseModel):
-    column_name: str = Field(..., min_length=1, max_length=200, pattern=r"^[a-zA-Z_][a-zA-Z0-9_]*$")
+    column_name: str = Field(..., min_length=1, max_length=200, pattern=r"^[a-zA-Z0-9_][a-zA-Z0-9_]*$")
     display_name: Optional[str] = None
     data_type: str = Field(..., description="NVARCHAR, INT, BIGINT, DECIMAL, DATETIME2, BIT, FLOAT, DATE")
     max_length: Optional[int] = Field(None, description="For NVARCHAR/VARCHAR columns")
@@ -47,6 +47,13 @@ class AlterTableRequest(BaseModel):
     add_columns: Optional[List[ColumnDefinition]] = None
     drop_columns: Optional[List[str]] = None
     rename_columns: Optional[Dict[str, str]] = None  # old_name: new_name
+    # For single-action requests from frontend
+    action: Optional[str] = None  # 'add_column', 'drop_column', 'rename_column', 'alter_column'
+    column_name: Optional[str] = None
+    new_name: Optional[str] = None  # For rename_column
+    new_type: Optional[str] = None  # For alter_column
+    data_type: Optional[str] = None  # For add_column
+    nullable: Optional[bool] = True  # For add_column
 
 
 class TableMetadataResponse(BaseModel):

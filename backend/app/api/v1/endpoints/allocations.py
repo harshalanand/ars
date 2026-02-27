@@ -87,7 +87,7 @@ async def run_allocation(
 # ============================================================================
 
 @router.get(
-    "/",
+    "",
     response_model=APIResponse,
     dependencies=[Depends(RequirePermissions(["ALLOC_READ"]))],
 )

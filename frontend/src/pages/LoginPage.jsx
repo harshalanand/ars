@@ -19,30 +19,30 @@ export default function LoginPage() {
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900">
-      <div className="w-full max-w-md">
-        <div className="text-center mb-8">
-          <div className="w-16 h-16 rounded-2xl bg-primary-600 flex items-center justify-center mx-auto mb-4 shadow-lg shadow-primary-600/30">
-            <Box size={32} className="text-white" />
+      <div className="w-full max-w-sm">
+        <div className="text-center mb-6">
+          <div className="w-12 h-12 rounded-xl bg-primary-600 flex items-center justify-center mx-auto mb-3 shadow-lg shadow-primary-600/30">
+            <Box size={24} className="text-white" />
           </div>
-          <h1 className="text-3xl font-bold text-white">ARS</h1>
-          <p className="text-slate-400 mt-1">Allocation & Retail System</p>
+          <h1 className="text-2xl font-bold text-white">ARS</h1>
+          <p className="text-slate-400 text-[12px] mt-0.5">Allocation & Retail System</p>
         </div>
-        <form onSubmit={handleSubmit} className="card p-8 space-y-5">
+        <form onSubmit={handleSubmit} className="card p-6 space-y-4">
           <div>
             <label className="label">Username</label>
             <div className="relative">
-              <User size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
-              <input type="text" value={username} onChange={e => setUsername(e.target.value)} className="input pl-10" placeholder="Enter username" required autoFocus />
+              <User size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
+              <input type="text" value={username} onChange={e => setUsername(e.target.value)} className="input pl-9" placeholder="Enter username" required autoFocus />
             </div>
           </div>
           <div>
             <label className="label">Password</label>
             <div className="relative">
-              <Lock size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
-              <input type="password" value={password} onChange={e => setPassword(e.target.value)} className="input pl-10" placeholder="Enter password" required />
+              <Lock size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
+              <input type="password" value={password} onChange={e => setPassword(e.target.value)} className="input pl-9" placeholder="Enter password" required />
             </div>
           </div>
-          <button type="submit" disabled={loading} className="btn-primary w-full py-2.5">
+          <button type="submit" disabled={loading} className="btn-primary w-full">
             {loading ? 'Signing in...' : 'Sign In'}
           </button>
         </form>
