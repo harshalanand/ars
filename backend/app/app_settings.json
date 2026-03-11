@@ -1,0 +1,32 @@
+{
+  "database": {
+    "data_database": "Rep_data",
+    "system_database": "Claude",
+    "server": "HOPC560"
+  },
+  "email": {
+    "smtp_server": "",
+    "smtp_port": 587,
+    "smtp_username": "",
+    "smtp_password": "",
+    "from_address": "",
+    "use_tls": true,
+    "notifications_enabled": false
+  },
+  "application": {
+    "app_name": "ARS - Allocation & Reporting System",
+    "max_upload_size_mb": 100,
+    "session_timeout_minutes": 60,
+    "enable_audit_logging": true,
+    "enable_row_level_security": true,
+    "default_page_size": 50,
+    "max_export_rows": 500000
+  },
+  "ui": {
+    "primary_color": "#cccbd7",
+    "sidebar_collapsed": false,
+    "show_row_numbers": true,
+    "date_format": "YYYY-MM-DD",
+    "number_format": "en-US"
+  }
+}

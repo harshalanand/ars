@@ -18,6 +18,9 @@ from app.api.v1.endpoints.upload import router as upload_router
 # Phase 3: Allocation Engine
 from app.api.v1.endpoints.allocations import router as allocations_router
 
+# Phase 4: MSA Stock Calculation
+from app.api.v1.endpoints.msa_stock import router as msa_router
+from app.api.v1.endpoints.msa import router as msa_legacy_router
 
 # Phase 5: Settings
 from app.api.v1.endpoints.settings import router as settings_router
@@ -42,6 +45,9 @@ api_router.include_router(upload_router)
 # Phase 3
 api_router.include_router(allocations_router)
 
+# Phase 4: MSA Stock Calculation
+api_router.include_router(msa_router)
+api_router.include_router(msa_legacy_router)
 
 # Phase 5
 api_router.include_router(settings_router)
