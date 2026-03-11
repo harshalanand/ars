@@ -3,7 +3,7 @@ import toast from 'react-hot-toast'
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api/v1'
 
-const api = axios.create({ baseURL: API_BASE, timeout: 60000 })
+const api = axios.create({ baseURL: API_BASE, timeout: 300000 }) // 5 minute timeout for complex calculations
 
 // Request interceptor: attach JWT
 api.interceptors.request.use((config) => {
@@ -164,13 +164,29 @@ export const allocAPI = {
 
 // ============== MSA Analysis ==============
 export const msaAPI = {
-  dates: () => api.get('/msa/dates'),
-  columns: () => api.get('/msa/columns'),
-  distinct: (column, date) => api.get(`/msa/distinct/${column}`, { params: { date } }),
-  data: (params) => api.get('/msa/data', { params }),
-  summary: (params) => api.get('/msa/summary', { params }),
-  pivot: (params) => api.get('/msa/pivot', { params }),
-  pending: (params) => api.get('/msa/pending', { params }),
+  // Configuration & Discovery
+  getColumns: () => api.get('/msa/columns'),
+  getDistinct: (column, date) => api.get('/msa/distinct', { params: { column, date } }),
+  loadConfig: (configName) => api.get(`/msa/load/${configName}`),
+  saveConfig: (payload) => api.post('/msa/config', payload),
+  
+  // Filtering & Data Loading
+  applyFilters: (payload) => api.post('/msa/filter', payload),
+  
+  // Debug endpoints
+  debugTestDate: (date) => api.get(`/msa/debug/test-date`, { params: { date } }),
+  
+  // Calculation
+  calculate: (payload) => api.post('/msa/calculate', payload),
+  
+  // Pivot Tables
+  generatePivot: (payload) => api.post('/msa/pivot', payload),
+  
+  // Save Results
+  save: (payload) => api.post('/msa/save', payload),
+  
+  // Legacy
+  run: (payload) => api.post('/msa/run', payload),
 }
 
 // ============== Audit ==============
