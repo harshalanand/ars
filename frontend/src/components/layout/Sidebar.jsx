@@ -1,8 +1,9 @@
 import { NavLink } from 'react-router-dom'
 import { 
-  LayoutDashboard, Table2, Upload, PackageCheck, Users, Shield, Eye, ScrollText, 
-  ChevronLeft, ChevronRight, Box, ChevronDown, FolderOpen, FilePlus, FileUp, 
-  FileDown, Edit3, Settings, Database, Columns, BarChart3, Cpu, Cog, Activity
+  LayoutDashboard, Table2, Upload, PackageCheck, Users, Shield, Eye, ScrollText,
+  ChevronLeft, ChevronRight, Box, ChevronDown, FolderOpen, FilePlus, FileUp,
+  FileDown, Edit3, Settings, Database, Columns, BarChart3, Cpu, Cog, Activity,
+  Clock, Truck
 } from 'lucide-react'
 import useAuthStore from '@/store/authStore'
 import clsx from 'clsx'
@@ -21,6 +22,12 @@ const dataManagementItems = [
   { label: 'Export Data', path: '/export', icon: FileDown },
   { label: 'Jobs Dashboard', path: '/jobs', icon: Activity },
   { label: 'Data Editor', path: '/editor', icon: Edit3 },
+]
+
+// Pending submenu
+const pendingItems = [
+  { label: 'Delivery Order', path: '/pending/delivery-order', icon: Truck },
+  { label: 'Allocation', path: '/pending/allocation', icon: PackageCheck },
 ]
 
 // Data Preparation submenu
@@ -188,6 +195,15 @@ export default function Sidebar({ collapsed, onToggle }) {
           title="Data Management" 
           icon={Database} 
           items={dataManagementItems} 
+          collapsed={collapsed}
+          hasPermission={hasPermission}
+        />
+
+        {/* Pending submenu */}
+        <SubMenu
+          title="Pending"
+          icon={Clock}
+          items={pendingItems}
           collapsed={collapsed}
           hasPermission={hasPermission}
         />

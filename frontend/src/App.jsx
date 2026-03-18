@@ -22,6 +22,8 @@ import SettingsPage from '@/pages/SettingsPage'
 import MSAStockCalculationPage from '@/pages/MSAStockCalculationPage'
 import ContributionPercentageCalculationPage from '@/pages/ContributionPercentageCalculationPage'
 import JobsDashboardPage from '@/pages/JobsDashboardPage'
+import PendingDeliveryOrderPage from '@/pages/PendingDeliveryOrderPage'
+import PendingAllocationPage from '@/pages/PendingAllocationPage'
 // Duplicate imports removed
 
 function ProtectedRoute({ children, permission }) {
@@ -53,6 +55,9 @@ export default function App() {
         <Route path="export" element={<ExportPage />} />
         <Route path="jobs" element={<JobsDashboardPage />} />
         <Route path="editor" element={<DataEditorPage />} />
+        {/* Pending */}
+        <Route path="pending/delivery-order" element={<PendingDeliveryOrderPage />} />
+        <Route path="pending/allocation" element={<PendingAllocationPage />} />
         {/* Data Preparation */}
         <Route path="msa" element={<MSAStockCalculationPage />} />
         <Route path="contribution" element={<ContributionPercentageCalculationPage />} />
