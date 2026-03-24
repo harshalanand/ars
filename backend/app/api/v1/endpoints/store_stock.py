@@ -9,7 +9,7 @@ from pydantic import BaseModel, validator
 from sqlalchemy import text
 from loguru import logger
 
-from app.database.session import get_data_engine, get_system_engine
+from app.database.session import get_data_engine
 from app.schemas.common import APIResponse
 from app.security.dependencies import get_current_user
 from app.models.rbac import User
@@ -177,11 +177,10 @@ def _fetch_saved(engine) -> dict:
 
 @router.get("/sloc-settings", response_model=APIResponse)
 def get_sloc_settings(current_user: User = Depends(get_current_user)):
-    se = get_system_engine()
-    de = get_data_engine()
+    de = get_data_engine()   # ARS_STORE_SLOC_SETTINGS lives in Rep_data
 
     try:
-        _ensure_table(se)
+        _ensure_table(de)
     except Exception as e:
         logger.error(f"_ensure_table failed: {e}")
         raise HTTPException(500, detail=f"DB schema setup failed: {e}")
@@ -192,7 +191,7 @@ def get_sloc_settings(current_user: User = Depends(get_current_user)):
         raise HTTPException(500, detail=f"Failed to read ET_STORE_STOCK: {e}")
 
     try:
-        saved = _fetch_saved(se)
+        saved = _fetch_saved(de)
     except Exception as e:
         raise HTTPException(500, detail=f"Failed to read {TABLE}: {e}")
 
@@ -212,9 +211,9 @@ def get_sloc_settings(current_user: User = Depends(get_current_user)):
 
 @router.post("/sync", response_model=APIResponse)
 def sync_slocs(current_user: User = Depends(get_current_user)):
-    se = get_system_engine(); de = get_data_engine()
+    de = get_data_engine()   # ARS_STORE_SLOC_SETTINGS lives in Rep_data
     try:
-        _ensure_table(se)
+        _ensure_table(de)
     except Exception as e:
         raise HTTPException(500, detail=f"DB schema setup failed: {e}")
 
@@ -223,7 +222,7 @@ def sync_slocs(current_user: User = Depends(get_current_user)):
     except Exception as e:
         raise HTTPException(500, detail=f"Failed to read ET_STORE_STOCK: {e}")
 
-    saved     = _fetch_saved(se)
+    saved     = _fetch_saved(de)
     new_slocs = [s for s in slocs if s not in saved]
 
     if new_slocs:
@@ -231,7 +230,7 @@ def sync_slocs(current_user: User = Depends(get_current_user)):
             INSERT INTO {TABLE} (sloc, kpi, status, created_at, updated_at)
             VALUES (:sloc, NULL, 'Active', GETDATE(), GETDATE())
         """)
-        with se.connect() as conn:
+        with de.connect() as conn:
             for s in new_slocs:
                 conn.execute(sql, {"sloc": s})
             conn.commit()
@@ -244,11 +243,11 @@ def sync_slocs(current_user: User = Depends(get_current_user)):
 @router.put("/sloc-settings/{sloc}", response_model=APIResponse)
 def update_sloc_setting(sloc: str, payload: SlocSetting,
                         current_user: User = Depends(get_current_user)):
-    se = get_system_engine()
-    try: _ensure_table(se)
+    de = get_data_engine()   # ARS_STORE_SLOC_SETTINGS lives in Rep_data
+    try: _ensure_table(de)
     except Exception as e: raise HTTPException(500, detail=str(e))
 
-    with se.connect() as conn:
+    with de.connect() as conn:
         conn.execute(text(f"""
             IF EXISTS (SELECT 1 FROM {TABLE} WHERE sloc=:sloc)
                 UPDATE {TABLE} SET kpi=:kpi, status=:status, updated_at=GETDATE() WHERE sloc=:sloc
@@ -263,11 +262,11 @@ def update_sloc_setting(sloc: str, payload: SlocSetting,
 
 @router.put("/sloc-settings", response_model=APIResponse)
 def bulk_update(payload: BulkUpdateRequest, current_user: User = Depends(get_current_user)):
-    se = get_system_engine()
-    try: _ensure_table(se)
+    de = get_data_engine()   # ARS_STORE_SLOC_SETTINGS lives in Rep_data
+    try: _ensure_table(de)
     except Exception as e: raise HTTPException(500, detail=str(e))
 
-    with se.connect() as conn:
+    with de.connect() as conn:
         for item in payload.items:
             conn.execute(text(f"""
                 IF EXISTS (SELECT 1 FROM {TABLE} WHERE sloc=:sloc)
