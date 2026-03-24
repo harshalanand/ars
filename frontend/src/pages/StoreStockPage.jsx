@@ -118,16 +118,25 @@ export default function StoreStockPage() {
   const [search,    setSearch]    = useState('')
   const [filterTab, setFilterTab] = useState('all')
 
+  // Load data + auto-sync new SLOCs every time the page/menu becomes active
   const loadData = useCallback(async () => {
     setLoading(true)
     try {
+      // 1. Sync new SLOCs silently first (no toast on auto-sync)
+      setSyncing(true)
+      const syncRes = await storeStockAPI.syncSlocs()
+      const added = syncRes.data?.data?.new_count || 0
+      if (added > 0) toast.success(`Auto-synced ${added} new SLOC${added > 1 ? 's' : ''} from ET_STORE_STOCK`)
+
+      // 2. Then fetch the full merged list
       const { data } = await storeStockAPI.getSlocSettings()
       setRows(data.data.items || [])
       setDirty({})
-    } catch {} finally { setLoading(false) }
+    } catch {} finally { setLoading(false); setSyncing(false) }
   }, [])
   useEffect(() => { loadData() }, [loadData])
 
+  // Manual sync button still available to force a refresh
   const handleSync = async () => {
     setSyncing(true)
     try {
