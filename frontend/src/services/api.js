@@ -267,4 +267,12 @@ export const contributionAPI = {
   getSavedResults: () => api.get('/contribution/results'),
 }
 
+// ============== Store Stock (Data Preparation) ==============
+export const storeStockAPI = {
+  getSlocSettings: () => api.get('/store-stock/sloc-settings'),
+  syncSlocs:       () => api.post('/store-stock/sync'),
+  updateSloc:      (sloc, data) => api.put(`/store-stock/sloc-settings/${encodeURIComponent(sloc)}`, data),
+  bulkUpdate:      (items) => api.put('/store-stock/sloc-settings', { items }),
+}
+
 export default api

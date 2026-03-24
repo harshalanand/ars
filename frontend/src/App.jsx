@@ -24,6 +24,7 @@ import ContributionPercentageCalculationPage from '@/pages/ContributionPercentag
 import JobsDashboardPage from '@/pages/JobsDashboardPage'
 import PendingDeliveryOrderPage from '@/pages/PendingDeliveryOrderPage'
 import PendingAllocationPage from '@/pages/PendingAllocationPage'
+import StoreStockPage from '@/pages/StoreStockPage'
 // Duplicate imports removed
 
 function ProtectedRoute({ children, permission }) {
@@ -61,6 +62,7 @@ export default function App() {
         {/* Data Preparation */}
         <Route path="msa" element={<MSAStockCalculationPage />} />
         <Route path="contribution" element={<ContributionPercentageCalculationPage />} />
+        <Route path="data-prep/store-stock" element={<StoreStockPage />} />
         {/* Allocations */}
         <Route path="allocations" element={<AllocationsPage />} />
         <Route path="allocations/new" element={<NewAllocationPage />} />

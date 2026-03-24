@@ -34,6 +34,7 @@ const pendingItems = [
 const dataPreparationItems = [
   { label: 'MSA Stock Calculation', path: '/msa', icon: BarChart3 },
   { label: 'Contribution Percentage', path: '/contribution', icon: BarChart3 },
+  { label: 'Store Stock', path: '/data-prep/store-stock', icon: Database },
 ]
 
 // Settings submenu (admin features)

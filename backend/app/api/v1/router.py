@@ -28,6 +28,9 @@ from app.api.v1.endpoints.contribution import router as contribution_router
 # Phase 5: Settings
 from app.api.v1.endpoints.settings import router as settings_router
 
+# Phase 6b: Store Stock (Data Preparation)
+from app.api.v1.endpoints.store_stock import router as store_stock_router
+
 # Phase 6: Dashboard
 from app.api.v1.endpoints.dashboard import router as dashboard_router
 
@@ -57,6 +60,9 @@ api_router.include_router(contribution_router)
 
 # Phase 5
 api_router.include_router(settings_router)
+
+# Phase 6b: Store Stock
+api_router.include_router(store_stock_router)
 
 # Phase 6
 api_router.include_router(dashboard_router)
