@@ -3,7 +3,15 @@ import toast from 'react-hot-toast'
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api/v1'
 
-const api = axios.create({ baseURL: API_BASE, timeout: 60000 })
+// Log actual API configuration
+console.log(`🔌 API Configuration:
+  Base URL: ${API_BASE}
+  Environment: ${import.meta.env.MODE}
+  Dev: ${import.meta.env.DEV}
+  Prod: ${import.meta.env.PROD}
+`);
+
+const api = axios.create({ baseURL: API_BASE, timeout: 300000 }) // 5 minute timeout for complex calculations
 
 // Request interceptor: attach JWT
 api.interceptors.request.use((config) => {
@@ -164,13 +172,40 @@ export const allocAPI = {
 
 // ============== MSA Analysis ==============
 export const msaAPI = {
-  dates: () => api.get('/msa/dates'),
-  columns: () => api.get('/msa/columns'),
-  distinct: (column, date) => api.get(`/msa/distinct/${column}`, { params: { date } }),
-  data: (params) => api.get('/msa/data', { params }),
-  summary: (params) => api.get('/msa/summary', { params }),
-  pivot: (params) => api.get('/msa/pivot', { params }),
-  pending: (params) => api.get('/msa/pending', { params }),
+  // Configuration & Discovery
+  getColumns: () => api.get('/msa/columns'),
+  getDistinct: (column, date, filters) => api.get('/msa/distinct', { 
+    params: { 
+      column, 
+      ...(date && { date }),
+      ...(filters && { filters })
+    } 
+  }),
+  loadConfig: (configName) => api.get(`/msa/load/${configName}`),
+  saveConfig: (payload) => api.post('/msa/config', payload),
+  
+  // Filtering & Data Loading
+  applyFilters: (payload) => api.post('/msa/filter', payload),
+  
+  // Debug endpoints
+  debugTestDate: (date) => api.get(`/msa/debug/test-date`, { params: { date } }),
+  
+  // Calculation
+  calculate: (payload) => api.post('/msa/calculate', payload),
+  
+  // Pivot Tables
+  generatePivot: (payload) => api.post('/msa/pivot', payload),
+  
+  // Save Results
+  save: (payload) => api.post('/msa/save', payload),
+  
+  // Stored Results Management (with Sequence Tracking)
+  getStoredSequences: (limit = 10) => api.get('/msa/results/sequences', { params: { limit } }),
+  getStoredResults: (sequenceId, table = 'msa') => api.get(`/msa/results/${sequenceId}`, { params: { table } }),
+  getSequenceSummary: (sequenceId) => api.get(`/msa/results/${sequenceId}/summary`),
+  
+  // Legacy
+  run: (payload) => api.post('/msa/run', payload),
 }
 
 // ============== Audit ==============
@@ -191,6 +226,45 @@ export const settingsAPI = {
   listBackups: () => api.get('/settings/backup/list'),
   createBackup: (database) => api.post('/settings/backup/create', { database }),
   deleteBackup: (filename) => api.delete(`/settings/backup/${filename}`),
+}
+
+// ============== Contribution Percentage Analysis ==============
+export const contributionAPI = {
+  // Presets
+  listPresets: () => api.get('/contribution/presets'),
+  getPreset: (name) => api.get(`/contribution/presets/${name}`),
+  createPreset: (data) => api.post('/contribution/presets', data),
+  updatePreset: (name, data) => api.put(`/contribution/presets/${name}`, data),
+  deletePreset: (name) => api.delete(`/contribution/presets/${name}`),
+  
+  // Mappings
+  listMappings: () => api.get('/contribution/mappings'),
+  getMapping: (name) => api.get(`/contribution/mappings/${name}`),
+  createMapping: (data) => api.post('/contribution/mappings', data),
+  updateMapping: (name, data) => api.put(`/contribution/mappings/${name}`, data),
+  deleteMapping: (name) => api.delete(`/contribution/mappings/${name}`),
+  
+  // Assignments
+  listAssignments: () => api.get('/contribution/assignments'),
+  getAssignment: (id) => api.get(`/contribution/assignments/${id}`),
+  createAssignment: (data) => api.post('/contribution/assignments', data),
+  updateAssignment: (id, data) => api.put(`/contribution/assignments/${id}`, data),
+  deleteAssignment: (id) => api.delete(`/contribution/assignments/${id}`),
+  
+  // Execution
+  calculate: (data) => api.post('/contribution/calculate', data),
+  getDynamicQuery: (params) => api.get('/contribution/dynamic-query', { params }),
+  getExecutionOptions: (groupingColumn) => api.get('/contribution/execution/options', { 
+    params: { 
+      grouping_column: groupingColumn
+    } 
+  }),
+  
+  // Export
+  export: (data) => api.post('/contribution/export', data),
+  downloadTable: (tableName) => `${API_BASE}/contribution/download/${tableName}`,
+  deleteTable: (tableName) => api.delete(`/contribution/tables/${tableName}`),
+  getSavedResults: () => api.get('/contribution/results'),
 }
 
 export default api
