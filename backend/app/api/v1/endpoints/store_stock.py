@@ -112,7 +112,29 @@ def _ensure_table(engine):
         # ── Step 5: fill any remaining NULLs in status ───────────────────────
         _run(c, f"UPDATE {TABLE} SET status='Active' WHERE status IS NULL")
 
-        # ── Step 6: drop legacy is_active column ─────────────────────────────
+        # ── Step 6: drop DEFAULT constraint on is_active FIRST ───────────────
+        # SQL Server blocks DROP COLUMN when a DEFAULT constraint exists.
+        # Find the auto-generated constraint name and drop it via dynamic SQL.
+        _run(c, f"""
+            IF EXISTS (
+                SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+                WHERE TABLE_NAME='{TABLE}' AND COLUMN_NAME='is_active'
+            )
+            BEGIN
+                DECLARE @con NVARCHAR(256)
+                SELECT @con = dc.name
+                FROM sys.default_constraints dc
+                JOIN sys.columns col
+                  ON dc.parent_object_id = col.object_id
+                 AND dc.parent_column_id = col.column_id
+                JOIN sys.tables t ON col.object_id = t.object_id
+                WHERE t.name = '{TABLE}' AND col.name = 'is_active'
+                IF @con IS NOT NULL
+                    EXEC('ALTER TABLE {TABLE} DROP CONSTRAINT [' + @con + ']')
+            END
+        """)
+
+        # ── Step 7: now drop the column safely ───────────────────────────────
         _run(c, f"""
             IF EXISTS (
                 SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
