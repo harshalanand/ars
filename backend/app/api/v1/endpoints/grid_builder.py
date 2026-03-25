@@ -136,20 +136,25 @@ def _row_to_dict(r) -> dict:
     }
 
 
-def _get_master_product_columns(engine) -> List[str]:
-    """Return column names from vw_master_product."""
+def _get_table_columns(engine, table_name: str) -> List[str]:
+    """Return column names for a table/view from INFORMATION_SCHEMA."""
     try:
         with engine.connect() as conn:
             rows = conn.execute(text("""
                 SELECT COLUMN_NAME
                 FROM INFORMATION_SCHEMA.COLUMNS
-                WHERE TABLE_NAME = 'vw_master_product'
+                WHERE TABLE_NAME = :tbl
                 ORDER BY ORDINAL_POSITION
-            """)).fetchall()
+            """), {"tbl": table_name}).fetchall()
         return [r[0] for r in rows]
     except Exception as e:
-        logger.warning(f"Could not read vw_master_product columns: {e}")
+        logger.warning(f"Could not read {table_name} columns: {e}")
         return []
+
+
+def _get_master_product_columns(engine) -> List[str]:
+    """Return column names from vw_master_product."""
+    return _get_table_columns(engine, "vw_master_product")
 
 
 def _build_and_run_grid(engine, grid: dict) -> dict:
@@ -185,25 +190,46 @@ def _build_and_run_grid(engine, grid: dict) -> dict:
     sum_expr     = " + ".join(f"ISNULL([{s}],0)" for s in slocs)
 
     # ── 3. Hierarchy columns SELECT & JOIN ────────────────────────────────────
-    # Columns that exist in vw_master_product use that view; else fall back to STK
+    # Determine which columns come from vw_master_product vs ET_STORE_STOCK
     mp_cols = _get_master_product_columns(engine)
+    mp_cols_upper = {c.upper(): c for c in mp_cols}   # upper→actual name
+    stk_cols = _get_table_columns(engine, "ET_STORE_STOCK")
+    stk_cols_upper = {c.upper() for c in stk_cols}
 
     hier_select_parts = []
     has_mp_cols       = False
     for col in hier_cols:
-        if col in mp_cols:
-            hier_select_parts.append(f"MP.[{col}]")
+        if col.upper() in mp_cols_upper:
+            actual = mp_cols_upper[col.upper()]
+            # Alias to ensure consistent column name after PIVOT
+            hier_select_parts.append(f"MP.[{actual}] AS [{col}]")
             has_mp_cols = True
+        elif col.upper() in stk_cols_upper:
+            hier_select_parts.append(f"STK.[{col}]")
         else:
             hier_select_parts.append(f"STK.[{col}]")
 
     hier_select = ", ".join(hier_select_parts)
     mp_join     = ""
     if has_mp_cols:
-        mp_join = "LEFT JOIN dbo.vw_master_product MP ON STK.MATNR = MP.MATNR AND STK.WERKS = MP.WERKS"
+        mp_join = "LEFT JOIN dbo.vw_master_product MP ON STK.MATNR = MP.ARTICLE_NUMBER"
 
-    # ── 4. Full dynamic SQL ───────────────────────────────────────────────────
-    pivot_sql = f"""
+    # ── 4. Determine output columns & types for CREATE TABLE ─────────────────
+    col_defs = ", ".join(f"[{c}] NVARCHAR(200) NULL" for c in hier_cols)
+    col_defs += ", " + ", ".join(f"[{s}] NUMERIC(18,4) NULL" for s in slocs)
+    col_defs += ", [STK_TTL] NUMERIC(18,4) NULL"
+
+    all_cols  = ", ".join(f"[{c}]" for c in hier_cols) + \
+                ", " + q_slocs + ", [STK_TTL]"
+
+    with engine.connect() as conn:
+        # Drop and recreate output table to ensure schema matches current grid config
+        _run(conn, f"""
+            IF OBJECT_ID('[{out_table}]', 'U') IS NOT NULL DROP TABLE [{out_table}];
+            CREATE TABLE [{out_table}] ({col_defs})
+        """)
+
+        insert_sql = f""";
 WITH Stock_CTE AS (
     SELECT
         {hier_select},
@@ -214,6 +240,7 @@ WITH Stock_CTE AS (
     INNER JOIN ARS_STORE_SLOC_SETTINGS S ON STK.SLOC = S.SLOC
     WHERE UPPER(S.STATUS) = 'ACTIVE'{kpi_clause}
 )
+INSERT INTO [{out_table}] ({all_cols})
 SELECT
     {', '.join(f'[{c}]' for c in hier_cols)},
     {isnull_cols},
@@ -224,39 +251,6 @@ PIVOT (
     FOR SLOC IN ({q_slocs})
 ) AS P
 ORDER BY {', '.join(f'[{c}]' for c in hier_cols)};
-"""
-
-    # ── 5. Determine output columns & types for CREATE TABLE ─────────────────
-    col_defs = ", ".join(f"[{c}] NVARCHAR(200) NULL" for c in hier_cols)
-    col_defs += ", " + ", ".join(f"[{s}] NUMERIC(18,4) NULL" for s in slocs)
-    col_defs += ", [STK_TTL] NUMERIC(18,4) NULL"
-
-    all_cols  = ", ".join(f"[{c}]" for c in hier_cols) + \
-                ", " + q_slocs + ", [STK_TTL]"
-
-    with engine.connect() as conn:
-        # Create output table if not exists
-        _run(conn, f"""
-            IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME='{out_table}')
-            CREATE TABLE [{out_table}] ({col_defs})
-        """)
-
-        # Add any new SLOC columns that weren't there before
-        for s in slocs:
-            _run(conn, f"""
-                IF NOT EXISTS (
-                    SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
-                    WHERE TABLE_NAME='{out_table}' AND COLUMN_NAME='{s}'
-                )
-                ALTER TABLE [{out_table}] ADD [{s}] NUMERIC(18,4) NULL
-            """)
-
-        # Truncate then insert
-        _run(conn, f"TRUNCATE TABLE [{out_table}]")
-
-        insert_sql = f"""
-INSERT INTO [{out_table}] ({all_cols})
-{pivot_sql}
 """
         conn.execute(text(insert_sql))
         conn.commit()
