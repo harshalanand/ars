@@ -284,6 +284,8 @@ export const bdcAPI = {
     api.post('/bdc/sheets', formData, {
       headers: { 'Content-Type': 'multipart/form-data' },
     }),
+}
+
 // ============== Store Stock (Data Preparation) ==============
 // DB columns: kpi (NVARCHAR) and status ('Active' | 'Inactive')
 export const storeStockAPI = {
