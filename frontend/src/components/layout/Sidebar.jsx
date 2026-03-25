@@ -3,6 +3,7 @@ import {
   LayoutDashboard, Table2, Upload, PackageCheck, Users, Shield, Eye, ScrollText,
   ChevronLeft, ChevronRight, Box, ChevronDown, FolderOpen, FilePlus, FileUp,
   FileDown, Edit3, Settings, Database, Columns, BarChart3, Cpu, Cog, Activity,
+  Clock, Truck, FileText
   Clock, Truck, ClipboardCheck, ShieldCheck, LayoutGrid
 } from 'lucide-react'
 import useAuthStore from '@/store/authStore'
@@ -34,6 +35,7 @@ const pendingItems = [
 const dataPreparationItems = [
   { label: 'MSA Stock Calculation', path: '/msa', icon: BarChart3 },
   { label: 'Contribution Percentage', path: '/contribution', icon: BarChart3 },
+  { label: 'BDC Creation', path: '/bdc', icon: FileText },
   { label: 'Store Stock', path: '/data-prep/store-stock', icon: LayoutGrid },
 ]
 

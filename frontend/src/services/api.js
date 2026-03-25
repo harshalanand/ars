@@ -267,6 +267,23 @@ export const contributionAPI = {
   getSavedResults: () => api.get('/contribution/results'),
 }
 
+// ============== BDC Creation ==============
+export const bdcAPI = {
+  upload: (formData) =>
+    api.post('/bdc/upload', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: 300000,
+    }),
+  download: (formData) =>
+    api.post('/bdc/download', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      responseType: 'blob',
+      timeout: 300000,
+    }),
+  getSheets: (formData) =>
+    api.post('/bdc/sheets', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    }),
 // ============== Store Stock (Data Preparation) ==============
 // DB columns: kpi (NVARCHAR) and status ('Active' | 'Inactive')
 export const storeStockAPI = {
