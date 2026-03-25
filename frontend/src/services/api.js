@@ -276,4 +276,15 @@ export const storeStockAPI = {
   bulkUpdate:      (items)      => api.put('/store-stock/sloc-settings', { items }),
 }
 
+// ============== Grid Builder (Data Preparation > Store Stock) ==============
+export const gridBuilderAPI = {
+  getColumns:  ()           => api.get('/grid-builder/columns'),
+  listGrids:   ()           => api.get('/grid-builder/grids'),
+  createGrid:  (data)       => api.post('/grid-builder/grids', data),
+  updateGrid:  (id, data)   => api.put(`/grid-builder/grids/${id}`, data),
+  deleteGrid:  (id)         => api.delete(`/grid-builder/grids/${id}`),
+  runGrid:     (id)         => api.post(`/grid-builder/grids/${id}/run`),
+  runAll:      ()           => api.post('/grid-builder/run-all'),
+}
+
 export default api
