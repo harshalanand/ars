@@ -134,7 +134,8 @@ class PermissionResponse(BaseModel):
 
 
 class AssignPermissionsRequest(BaseModel):
-    permission_ids: List[int]
+    permission_ids: Optional[List[int]] = None
+    permission_codes: Optional[List[str]] = None
 
 
 # ============================================================================

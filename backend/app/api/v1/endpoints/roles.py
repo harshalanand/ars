@@ -129,11 +129,20 @@ async def assign_permissions(
     if not role:
         raise HTTPException(status_code=404, detail="Role not found")
 
+    # Resolve permission IDs from codes if needed
+    perm_ids = body.permission_ids or []
+    if body.permission_codes:
+        for code in body.permission_codes:
+            perm = db.query(Permission).filter(Permission.permission_code == code).first()
+            if perm:
+                perm_ids.append(perm.id)
+    perm_ids = list(set(perm_ids))  # deduplicate
+
     # Remove existing
     db.query(RolePermission).filter(RolePermission.role_id == role_id).delete()
 
     # Add new
-    for pid in body.permission_ids:
+    for pid in perm_ids:
         perm = db.query(Permission).filter(Permission.id == pid).first()
         if perm:
             db.add(RolePermission(
@@ -145,7 +154,7 @@ async def assign_permissions(
     AuditService(db).log(
         table_name="rbac_role_permissions", action_type="UPDATE",
         changed_by=current_user.username, record_primary_key=str(role_id),
-        new_data={"permission_ids": body.permission_ids},
+        new_data={"permission_ids": perm_ids},
         notes="Permissions reassigned",
     )
     db.commit()
