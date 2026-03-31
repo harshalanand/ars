@@ -335,9 +335,34 @@ export const contribAPI = {
   downloadJobResult: (id, type) => api.get(`/contrib/jobs/${id}/download/${type}`, { responseType: 'blob', timeout: 600000 }),
   // Review
   listTables:    ()         => api.get('/contrib/review/tables'),
-  previewTable:  (name, limit=500) => api.get(`/contrib/review/preview/${encodeURIComponent(name)}`, { params: { limit } }),
-  downloadTable: (name)     => api.get(`/contrib/review/download/${encodeURIComponent(name)}`, { responseType: 'blob', timeout: 300000 }),
+  previewTable:  (name, limit=500, filters={}) => {
+    const params = { limit }
+    Object.entries(filters).forEach(([col, vals]) => { if (vals.length) params[`f_${col}`] = vals.join(',') })
+    return api.get(`/contrib/review/preview/${encodeURIComponent(name)}`, { params })
+  },
+  downloadTable: (name)     => api.get(`/contrib/review/download/${encodeURIComponent(name)}`, { responseType: 'blob', timeout: 600000 }),
   deleteTable:   (name)     => api.delete(`/contrib/review/tables/${encodeURIComponent(name)}`),
+  // Review Export Jobs (background download)
+  startExport:      (name, filters={})  => api.post(`/contrib/review/export/${encodeURIComponent(name)}`, { filters }),
+  listExports:      ()      => api.get('/contrib/review/exports'),
+  getExport:        (id)    => api.get(`/contrib/review/exports/${id}`),
+  downloadExport:   (id)    => api.get(`/contrib/review/exports/${id}/download`, { responseType: 'blob', timeout: 600000 }),
+  deleteExport:     (id)    => api.delete(`/contrib/review/exports/${id}`),
+}
+
+// ============== Reports ==============
+export const reportsAPI = {
+  getPendAlc:         (limit=5000, filters={}) => {
+    const params = { limit }
+    Object.entries(filters).forEach(([col, vals]) => { if (vals.length) params[`f_${col}`] = vals.join(',') })
+    return api.get('/reports/pend-alc', { params })
+  },
+  getDistinctValues:  (col)        => api.get(`/reports/pend-alc/distinct/${col}`),
+  downloadPendAlc:    (filters={}) => {
+    const params = {}
+    Object.entries(filters).forEach(([col, vals]) => { if (vals.length) params[`f_${col}`] = vals.join(',') })
+    return api.get('/reports/pend-alc/download', { params, responseType: 'blob', timeout: 600000 })
+  },
 }
 
 export default api

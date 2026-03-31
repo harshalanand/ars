@@ -25,13 +25,11 @@ import ContribMappingsPage from '@/pages/ContribMappingsPage'
 import ContribExecutePage from '@/pages/ContribExecutePage'
 import ContribReviewPage from '@/pages/ContribReviewPage'
 import JobsDashboardPage from '@/pages/JobsDashboardPage'
-import PendingDeliveryOrderPage from '@/pages/PendingDeliveryOrderPage'
-import PendingAllocationPage from '@/pages/PendingAllocationPage'
 import BDCCreationPage from '@/pages/BDCCreationPage'
 import StoreStockPage from '@/pages/StoreStockPage'
 import GridBuilderPage from '@/pages/GridBuilderPage'
 import LookupArtMasterPage from '@/pages/LookupArtMasterPage'
-// Duplicate imports removed
+import PendAlcReportPage from '@/pages/PendAlcReportPage'
 
 function ProtectedRoute({ children, permission }) {
   const { isAuthenticated, hasPermission } = useAuthStore()
@@ -63,8 +61,6 @@ export default function App() {
         <Route path="jobs" element={<JobsDashboardPage />} />
         <Route path="editor" element={<DataEditorPage />} />
         {/* Pending */}
-        <Route path="pending/delivery-order" element={<PendingDeliveryOrderPage />} />
-        <Route path="pending/allocation" element={<PendingAllocationPage />} />
         {/* Data Preparation */}
         <Route path="msa" element={<MSAStockCalculationPage />} />
         <Route path="contribution/presets" element={<ContribPresetsPage />} />
@@ -76,6 +72,8 @@ export default function App() {
         {/* Data Preparation - Store Stock Grid Builder */}
         <Route path="data-prep/store-stock" element={<GridBuilderPage />} />
         <Route path="data-prep/lookup-art-master" element={<LookupArtMasterPage />} />
+        {/* Reports */}
+        <Route path="reports/pend-alc" element={<PendAlcReportPage />} />
         {/* Allocations */}
         <Route path="allocations" element={<AllocationsPage />} />
         <Route path="allocations/new" element={<NewAllocationPage />} />

@@ -24,10 +24,10 @@ class Settings(BaseSettings):
     DB_PASSWORD: str = "vrl@55555"
     DB_DRIVER: str = "ODBC Driver 18 for SQL Server"
     DB_TRUST_CERT: str = "yes"
-    DB_POOL_SIZE: int = 20
-    DB_MAX_OVERFLOW: int = 30
-    DB_POOL_TIMEOUT: int = 30
-    DB_POOL_RECYCLE: int = 1800
+    DB_POOL_SIZE: int = 30
+    DB_MAX_OVERFLOW: int = 40
+    DB_POOL_TIMEOUT: int = 60
+    DB_POOL_RECYCLE: int = 300  # Recycle connections every 5 min to avoid stale connections
 
     # Working Database (Business data, dynamic tables, allocations)
     DATA_DB_NAME: str = "Rep_data"

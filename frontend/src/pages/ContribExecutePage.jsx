@@ -148,7 +148,6 @@ export default function ContribExecutePage() {
 
   // Jobs
   const [jobs, setJobs] = useState([])
-  const [jobsOpen, setJobsOpen] = useState(true)
   const [activeJobId, setActiveJobId] = useState(null)
   const [activeJobData, setActiveJobData] = useState(null)
   const [resultTab, setResultTab] = useState('store')
@@ -184,29 +183,46 @@ export default function ContribExecutePage() {
     return () => clearInterval(pollRef.current)
   }, [refreshJobs])
 
-  // Load full job data when status changes or progress updates (e.g., DB save finishes)
-  const prevRef = useRef({})
+  // Track which jobs we've already fetched results for & auto-deleted
+  const fetchedRef = useRef(new Set())
+  const deletedRef = useRef(new Set())
+
+  // Load full job data when completed, then auto-delete from server after fetching results
   useEffect(() => {
     if (!activeJobId) return
     const job = jobs.find(j => j.id === activeJobId)
     if (!job) return
-    const prev = prevRef.current[activeJobId] || {}
-    const statusChanged = job.status !== prev.status
-    const progressChanged = job.status === 'completed' && job.progress !== prev.progress
-    prevRef.current[activeJobId] = { status: job.status, progress: job.progress }
 
-    const shouldFetch = statusChanged || progressChanged || (job.status === 'completed' && !activeJobData)
-    if (shouldFetch && (job.status === 'completed' || job.status === 'failed')) {
+    // Fetch results when completed/failed (once)
+    if ((job.status === 'completed' || job.status === 'failed') && !fetchedRef.current.has(activeJobId)) {
+      fetchedRef.current.add(activeJobId)
       contribAPI.getJob(activeJobId).then(r => {
         const d = r.data?.data?.job
         setActiveJobData(d)
-        if (!activeJobData) {
-          if (d?.store_rows > 0) setResultTab('store')
-          else if (d?.company_rows > 0) setResultTab('company')
-        }
+        if (d?.store_rows > 0) setResultTab('store')
+        else if (d?.company_rows > 0) setResultTab('company')
       }).catch(() => {})
     }
   }, [activeJobId, jobs])
+
+  // Auto-delete completed/failed/cancelled jobs from server (keep them out of jobs list)
+  useEffect(() => {
+    for (const j of jobs) {
+      if (['completed', 'failed', 'cancelled'].includes(j.status) && !deletedRef.current.has(j.id)) {
+        // Don't delete if it's the active job and we haven't fetched results yet
+        if (j.id === activeJobId && j.status === 'completed' && !fetchedRef.current.has(j.id)) continue
+        // For completed active job: wait a moment for results to load, then delete
+        const delay = j.id === activeJobId ? 3000 : 500
+        setTimeout(async () => {
+          if (!deletedRef.current.has(j.id)) {
+            deletedRef.current.add(j.id)
+            try { await contribAPI.deleteJob(j.id) } catch {}
+            refreshJobs()
+          }
+        }, delay)
+      }
+    }
+  }, [jobs, activeJobId])
 
   const presetNames = presets.map(p => p.preset_name)
 
@@ -224,7 +240,8 @@ export default function ContribExecutePage() {
       toast.success(`Job ${jobId} queued`)
       setActiveJobId(jobId)
       setActiveJobData(null)
-      setJobsOpen(true)
+      fetchedRef.current.delete(jobId)
+      deletedRef.current.delete(jobId)
       refreshJobs()
     } catch (e) {
       toast.error(e.response?.data?.detail || 'Failed to create job')
@@ -247,25 +264,11 @@ export default function ContribExecutePage() {
   }
 
   const handleDeleteJob = async (id) => {
-    if (!confirm('Delete this job?')) return
     try {
       await contribAPI.deleteJob(id)
       if (activeJobId === id) { setActiveJobId(null); setActiveJobData(null) }
-      toast.success('Job deleted')
       refreshJobs()
-    } catch { toast.error('Delete failed') }
-  }
-
-  const handleViewJob = async (id) => {
-    setActiveJobId(id)
-    setActiveJobData(null)
-    try {
-      const { data } = await contribAPI.getJob(id)
-      setActiveJobData(data.data?.job)
-      const d = data.data?.job
-      if (d?.store_rows > 0) setResultTab('store')
-      else if (d?.company_rows > 0) setResultTab('company')
-    } catch { toast.error('Failed to load job') }
+    } catch {}
   }
 
   const [downloadingType, setDownloadingType] = useState(null)
@@ -283,12 +286,22 @@ export default function ContribExecutePage() {
       a.download = `contrib_${type}_${activeJobId}.${ext}`
       a.click()
       toast.success('Download complete')
-    } catch {
-      toast.error('Download failed')
+    } catch (e) {
+      let msg = 'Download failed'
+      try {
+        if (e.response?.data instanceof Blob) {
+          msg = await e.response.data.text()
+          try { msg = JSON.parse(msg).detail || msg } catch {}
+        } else {
+          msg = e.response?.data?.detail || e.message || msg
+        }
+      } catch {}
+      toast.error(typeof msg === 'string' ? msg.slice(0, 200) : 'Download failed')
     } finally { setDownloadingType(null) }
   }
 
-  const runningCount = jobs.filter(j => ['running','pending','paused'].includes(j.status)).length
+  const activeJobs = jobs.filter(j => ['running','pending','paused'].includes(j.status))
+  const runningCount = activeJobs.length
   const activeJob = jobs.find(j => j.id === activeJobId)
 
   return (
@@ -297,84 +310,47 @@ export default function ContribExecutePage() {
         <Cpu size={20} color={C.primary}/> Contribution % — Execute
       </h1>
 
-      {/* ── JOBS PANEL ── */}
-      <div style={{ background:C.cardBg, border:`1px solid ${C.cardBorder}`, borderRadius:12, overflow:'hidden', marginBottom:16 }}>
-        <div onClick={() => setJobsOpen(!jobsOpen)} style={{
-          padding:'10px 18px', background:C.headerBg, borderBottom: jobsOpen ? `1px solid ${C.cardBorder}` : 'none',
-          display:'flex', alignItems:'center', gap:8, cursor:'pointer',
-        }}>
-          <Briefcase size={14} color={C.primary}/>
-          <span style={{ fontSize:13, fontWeight:700 }}>Jobs</span>
-          {runningCount > 0 && (
-            <span style={{ background:C.amber, color:'#fff', borderRadius:99, padding:'1px 8px', fontSize:10, fontWeight:800 }}>
-              {runningCount} active
-            </span>
-          )}
-          <span style={{ fontSize:11, color:C.textMuted, marginLeft:4 }}>{jobs.length} total</span>
-          <ChevronDown size={14} color={C.textMuted} style={{ marginLeft:'auto', transform:jobsOpen?'rotate(180deg)':'none', transition:'.15s' }}/>
-        </div>
-
-        {jobsOpen && (
-          <div style={{ maxHeight:220, overflowY:'auto' }}>
-            {jobs.length === 0 && <div style={{ padding:20, textAlign:'center', color:C.textMuted, fontSize:12 }}>No jobs yet. Click Execute to start.</div>}
-            {jobs.map(j => {
-              const sc = statusColors[j.status] || statusColors.pending
-              const Icon = sc.icon
-              const isActive = j.id === activeJobId
-              return (
-                <div key={j.id} onClick={() => handleViewJob(j.id)} style={{
-                  display:'flex', alignItems:'center', gap:10, padding:'8px 18px', cursor:'pointer',
-                  borderBottom:`1px solid ${C.cardBorder}`,
-                  background: isActive ? C.primaryLight : '#fff',
-                }}>
-                  <Icon size={14} color={sc.fg} style={j.status==='running' ? { animation:'spin 1s linear infinite' } : {}}/>
-                  <div style={{ flex:1, minWidth:0 }}>
-                    <div style={{ fontSize:12, fontWeight:700, display:'flex', alignItems:'center', gap:6 }}>
-                      <span style={{ color:C.text }}>{j.id}</span>
-                      <span style={{ fontSize:10, color:C.textMuted, fontWeight:400 }}>{j.label}</span>
-                    </div>
-                    <div style={{ fontSize:10, color:C.textMuted }}>
-                      {j.status === 'running' && <span style={{ color:C.amber, fontWeight:600 }}>{j.progress}</span>}
-                      {j.status === 'paused' && <span style={{ color:'#2563eb', fontWeight:600 }}>Paused at {j.progress}</span>}
-                      {j.status === 'completed' && <span style={{ color:C.green }}>{j.store_rows?.toLocaleString()} store · {j.company_rows?.toLocaleString()} company · {j.duration}s</span>}
-                      {j.status === 'failed' && <span style={{ color:C.red, wordBreak:'break-all' }}>{j.error}</span>}
-                      {j.status === 'pending' && <span>Queued</span>}
-                      {j.status === 'cancelled' && <span>Cancelled</span>}
-                    </div>
+      {/* ── ACTIVE JOBS (only pending/running/paused) ── */}
+      {activeJobs.length > 0 && (
+        <div style={{ background:C.amberBg, border:`1px solid ${C.amberBd}`, borderRadius:10, padding:'10px 18px', marginBottom:16 }}>
+          {activeJobs.map(j => {
+            const sc = statusColors[j.status] || statusColors.pending
+            const Icon = sc.icon
+            return (
+              <div key={j.id} style={{ display:'flex', alignItems:'center', gap:10, padding:'6px 0' }}>
+                <Icon size={14} color={sc.fg} style={j.status==='running' ? { animation:'spin 1s linear infinite' } : {}}/>
+                <div style={{ flex:1, minWidth:0 }}>
+                  <div style={{ fontSize:12, fontWeight:700, display:'flex', alignItems:'center', gap:6 }}>
+                    <span>{j.id}</span>
+                    <span style={{ fontSize:10, color:C.textMuted, fontWeight:400 }}>{j.label}</span>
                   </div>
-                  <span style={{ padding:'2px 8px', borderRadius:12, fontSize:10, fontWeight:700, background:sc.bg, color:sc.fg, border:`1px solid ${sc.fg}22` }}>
-                    {j.status}
-                  </span>
-                  {j.status === 'running' && (
-                    <button onClick={e => { e.stopPropagation(); handlePause(j.id) }}
-                      style={{ padding:'3px 8px', borderRadius:6, fontSize:10, fontWeight:700, border:'1px solid #93c5fd', background:'#dbeafe', color:'#2563eb', cursor:'pointer' }}>
-                      Pause
-                    </button>
-                  )}
-                  {j.status === 'paused' && (
-                    <button onClick={e => { e.stopPropagation(); handleResume(j.id) }}
-                      style={{ padding:'3px 8px', borderRadius:6, fontSize:10, fontWeight:700, border:`1px solid ${C.greenBd}`, background:C.greenBg, color:C.green, cursor:'pointer' }}>
-                      Resume
-                    </button>
-                  )}
-                  {(j.status === 'pending' || j.status === 'running' || j.status === 'paused') && (
-                    <button onClick={e => { e.stopPropagation(); handleCancel(j.id) }}
-                      style={{ padding:'3px 8px', borderRadius:6, fontSize:10, fontWeight:700, border:'1px solid #fecaca', background:C.redBg, color:C.red, cursor:'pointer' }}>
-                      Cancel
-                    </button>
-                  )}
-                  {(j.status === 'completed' || j.status === 'failed' || j.status === 'cancelled') && (
-                    <button onClick={e => { e.stopPropagation(); handleDeleteJob(j.id) }}
-                      style={{ padding:'3px 8px', borderRadius:6, fontSize:10, fontWeight:700, border:'1px solid #e2e8f0', background:'#f8fafc', color:C.textMuted, cursor:'pointer' }}>
-                      Delete
-                    </button>
-                  )}
+                  <div style={{ fontSize:11, color:C.amber, fontWeight:600 }}>
+                    {j.status === 'running' && j.progress}
+                    {j.status === 'paused' && `Paused at ${j.progress}`}
+                    {j.status === 'pending' && 'Queued...'}
+                  </div>
                 </div>
-              )
-            })}
-          </div>
-        )}
-      </div>
+                {j.status === 'running' && (
+                  <button onClick={() => handlePause(j.id)}
+                    style={{ padding:'3px 8px', borderRadius:6, fontSize:10, fontWeight:700, border:'1px solid #93c5fd', background:'#dbeafe', color:'#2563eb', cursor:'pointer' }}>
+                    Pause
+                  </button>
+                )}
+                {j.status === 'paused' && (
+                  <button onClick={() => handleResume(j.id)}
+                    style={{ padding:'3px 8px', borderRadius:6, fontSize:10, fontWeight:700, border:`1px solid ${C.greenBd}`, background:C.greenBg, color:C.green, cursor:'pointer' }}>
+                    Resume
+                  </button>
+                )}
+                <button onClick={() => handleCancel(j.id)}
+                  style={{ padding:'3px 8px', borderRadius:6, fontSize:10, fontWeight:700, border:'1px solid #fecaca', background:C.redBg, color:C.red, cursor:'pointer' }}>
+                  Cancel
+                </button>
+              </div>
+            )
+          })}
+        </div>
+      )}
 
       {/* ── CONFIG ── */}
       <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:16, marginBottom:16 }}>

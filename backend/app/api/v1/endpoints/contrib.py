@@ -25,7 +25,7 @@ from collections import OrderedDict
 
 import numpy as np
 import pandas as pd
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import text, inspect
@@ -95,10 +95,19 @@ def _run(conn, sql, params=None):
     conn.execute(text(sql), params or {})
     conn.commit()
 
-def _read_sql_nolock(query, engine):
-    """Read SQL with READ UNCOMMITTED isolation to avoid blocking."""
-    with engine.connect().execution_options(isolation_level="READ UNCOMMITTED") as conn:
-        return pd.read_sql(text(query) if not isinstance(query, str) else query, conn)
+def _read_sql_nolock(query, engine, retries=2):
+    """Read SQL with READ UNCOMMITTED isolation. Retries on connection drop."""
+    for attempt in range(retries + 1):
+        try:
+            with engine.connect().execution_options(isolation_level="READ UNCOMMITTED") as conn:
+                return pd.read_sql(text(query) if not isinstance(query, str) else query, conn)
+        except Exception as e:
+            if attempt < retries and ('10054' in str(e) or '08S01' in str(e) or 'Communication link' in str(e)):
+                logger.warning(f"_read_sql_nolock: connection drop on attempt {attempt+1}, retrying in 2s...")
+                time.sleep(2)
+                engine.dispose()  # Reset connection pool
+                continue
+            raise
 
 def _ensure_preset_table(engine):
     with engine.connect() as c:
@@ -223,11 +232,15 @@ def _load_persisted_jobs():
     except Exception:
         pass
 
-# Load persisted jobs on module import
-try:
-    _load_persisted_jobs()
-except Exception:
-    pass
+_jobs_loaded = False
+def _lazy_load_jobs():
+    global _jobs_loaded
+    if not _jobs_loaded:
+        _jobs_loaded = True
+        try:
+            _load_persisted_jobs()
+        except Exception:
+            pass
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  CONFIG ENDPOINTS
@@ -551,9 +564,9 @@ def _process_single_preset(engine, preset_name, preset_cfg, majcats, grouping_co
     t = time.time()
     data_query = f"""
         SELECT ST_CD, MAJ_CAT, {grouping_column},
-               AVG(OP_STK_Q) AS OP_STK_Q, AVG(OP_STK_V) AS OP_STK_V,
-               AVG(CL_STK_Q) AS CL_STK_Q, AVG(CL_STK_V) AS CL_STK_V,
-               AVG(SALE_Q) AS SALE_Q, AVG(SALE_V) AS SALE_V, AVG(GM_V) AS GM_V
+               ROUND(AVG(OP_STK_Q), 2) AS OP_STK_Q, ROUND(AVG(OP_STK_V), 2) AS OP_STK_V,
+               ROUND(AVG(CL_STK_Q), 2) AS CL_STK_Q, ROUND(AVG(CL_STK_V), 2) AS CL_STK_V,
+               ROUND(AVG(SALE_Q), 2) AS SALE_Q, ROUND(AVG(SALE_V), 2) AS SALE_V, ROUND(AVG(GM_V), 2) AS GM_V
         FROM (
             SELECT sal_stk.STOCK_DATE, sal_stk.WERKS AS ST_CD,
                    prod.MAJ_CAT, prod.{grouping_column},
@@ -737,50 +750,93 @@ def _apply_mapping_assignments(df, engine):
     return df
 
 
-def _save_to_db(engine, df, table_name):
-    """Fast bulk save using raw pyodbc fast_executemany with vectorized conversion."""
-    cols = list(df.columns)
-    ncols = len(cols)
+def _save_to_db(engine, df, table_name, retries=3, progress_cb=None):
+    """Save DataFrame to DB using raw pyodbc fast_executemany with retry on connection drop.
 
-    # Clean: inf→NaN, round floats, convert float32→float64
+    Args:
+        engine: SQLAlchemy engine
+        df: DataFrame to save
+        table_name: Target table name
+        retries: Number of retry attempts on connection failure
+        progress_cb: Optional callback(inserted_rows, total_rows) for progress tracking
+    """
+    # Clean data once (reused across retries)
     df_out = df.copy()
     df_out.replace([np.inf, -np.inf], np.nan, inplace=True)
-    for c in df_out.select_dtypes(include=['float32', 'float64', 'float']).columns:
-        df_out[c] = df_out[c].astype('float64').round(4)
+    for c in df_out.select_dtypes(include=['float32']).columns:
+        df_out[c] = df_out[c].astype('float64')
+    for c in df_out.select_dtypes(include=['float64', 'float']).columns:
+        df_out[c] = df_out[c].round(4)
 
-    # Vectorized: convert all columns to object dtype with None for NaN
-    # This is 100x faster than cell-by-cell Python loop
+    cols = list(df_out.columns)
+    ncols = len(cols)
+
+    # Build column defs with proper types — use FLOAT for numeric to avoid overflow (22003)
+    col_defs = []
     for c in cols:
-        series = df_out[c]
-        mask = series.isna()
+        dt = df_out[c].dtype
+        if pd.api.types.is_float_dtype(dt) or pd.api.types.is_integer_dtype(dt):
+            col_defs.append(f"[{c}] FLOAT NULL")
+        else:
+            col_defs.append(f"[{c}] NVARCHAR(450) NULL")
+
+    # Convert NaN to None for all columns (vectorized) — do once
+    for c in cols:
+        mask = df_out[c].isna()
         if mask.any():
-            df_out[c] = series.astype(object)
+            df_out[c] = df_out[c].astype(object)
             df_out.loc[mask, c] = None
 
-    col_def_sql = ", ".join(f"[{c}] NVARCHAR(450) NULL" for c in cols)
+    # Pre-compute tuples once to avoid re-conversion on retry
+    BATCH = 50000
+    batches = []
+    for start in range(0, len(df_out), BATCH):
+        chunk = df_out.iloc[start:start+BATCH]
+        batches.append(list(chunk.itertuples(index=False, name=None)))
 
-    raw_conn = engine.raw_connection()
-    try:
-        cursor = raw_conn.cursor()
-        cursor.fast_executemany = True
+    col_list = ", ".join(f"[{c}]" for c in cols)
+    placeholders = ", ".join(["?"] * ncols)
+    insert_sql = f"INSERT INTO [{table_name}] ({col_list}) VALUES ({placeholders})"
 
-        cursor.execute(f"IF OBJECT_ID('{table_name}','U') IS NOT NULL DROP TABLE [{table_name}]")
-        cursor.execute(f"CREATE TABLE [{table_name}] ({col_def_sql})")
-        raw_conn.commit()
+    last_err = None
+    for attempt in range(retries + 1):
+        try:
+            if attempt > 0:
+                wait = min(2 ** attempt, 10)
+                logger.warning(f"_save_to_db retry {attempt}/{retries} for {table_name} after {wait}s wait")
+                time.sleep(wait)
+                engine.dispose()  # Reset connection pool on retry
 
-        col_list = ", ".join(f"[{c}]" for c in cols)
-        placeholders = ", ".join(["?"] * ncols)
-        insert_sql = f"INSERT INTO [{table_name}] ({col_list}) VALUES ({placeholders})"
+            raw_conn = engine.raw_connection()
+            try:
+                cursor = raw_conn.cursor()
+                cursor.fast_executemany = True
 
-        # Convert to list of tuples (fast with .values)
-        rows = list(df_out.itertuples(index=False, name=None))
+                # Drop + Create
+                cursor.execute(f"IF OBJECT_ID('{table_name}','U') IS NOT NULL DROP TABLE [{table_name}]")
+                cursor.execute(f"CREATE TABLE [{table_name}] ({', '.join(col_defs)})")
+                raw_conn.commit()
 
-        BATCH = 50000
-        for i in range(0, len(rows), BATCH):
-            cursor.executemany(insert_sql, rows[i:i + BATCH])
-        raw_conn.commit()
-    finally:
-        raw_conn.close()
+                # Insert in batches
+                inserted = 0
+                for batch_rows in batches:
+                    cursor.executemany(insert_sql, batch_rows)
+                    inserted += len(batch_rows)
+                    if progress_cb:
+                        progress_cb(inserted, len(df_out))
+
+                raw_conn.commit()
+                return  # Success
+            finally:
+                raw_conn.close()
+
+        except Exception as e:
+            last_err = e
+            err_str = str(e)
+            is_connection_error = any(code in err_str for code in ('10054', '08S01', 'Communication link', '08001', 'TCP Provider'))
+            if attempt < retries and is_connection_error:
+                continue
+            raise last_err
 
 
 # ── Job queue helpers ────────────────────────────────────────────────────────
@@ -799,6 +855,7 @@ def _run_job(job_id):
         if not job or job["status"] == "cancelled":
             return
     _update_job(job_id, status="running", started_at=datetime.now().isoformat())
+    logger.info(f"[Job {job_id}] Started — payload: {json.dumps(job.get('payload',{}), default=str)[:300]}")
 
     try:
         payload = job["payload"]
@@ -825,10 +882,12 @@ def _run_job(job_id):
             except Exception:
                 majcats = []
 
+        logger.info(f"[Job {job_id}] Loading master data (avg_density, APF)...")
         t_master = time.time()
         avg_density = _read_sql_nolock("SELECT * FROM master_avg_density WITH (NOLOCK)", engine)
         apf = _read_sql_nolock("SELECT ST_CD, APF, STATUS, REF_ST_CD, REF_ST_NM, REF_GRP_NEW, REF_GRP_OLD FROM Master_STORE_PLAN WITH (NOLOCK)", engine)
         master_load_time = round(time.time()-t_master, 2)
+        logger.info(f"[Job {job_id}] Master data loaded in {master_load_time}s (avg_density: {len(avg_density)} rows, APF: {len(apf)} rows)")
 
         t0 = time.time()
         results = {}
@@ -857,17 +916,21 @@ def _run_job(job_id):
                 log.append({"preset": pname, "status": "skipped", "reason": "not found"})
                 continue
             try:
+                logger.info(f"[Job {job_id}] Processing preset {idx}/{len(selected)}: {pname}")
                 t1 = time.time()
                 df_det, df_agg, step_timing, df_master_cache = _process_single_preset(
                     engine, pname, all_presets[pname], majcats, gc_col, avg_density, apf, df_master_cache)
                 dur = round(time.time()-t1, 2)
                 if df_det.empty:
+                    logger.warning(f"[Job {job_id}] Preset {pname} returned empty in {dur}s")
                     log.append({"preset": pname, "status": "empty", "duration": dur, "timing": step_timing})
                 else:
+                    logger.info(f"[Job {job_id}] Preset {pname}: {len(df_det):,} rows in {dur}s")
                     results[pname] = {"detail": df_det, "aggregated": df_agg}
                     log.append({"preset": pname, "status": "ok", "rows": len(df_det),
                                 "duration": dur, "timing": step_timing})
             except Exception as e:
+                logger.error(f"[Job {job_id}] Preset {pname} failed: {e}")
                 log.append({"preset": pname, "status": "error", "error": str(e)[:500]})
 
         if not results:
@@ -875,6 +938,7 @@ def _run_job(job_id):
             return
 
         # Combine
+        logger.info(f"[Job {job_id}] Combining {len(results)} presets...")
         _update_job(job_id, progress="combining presets...")
         detail_dfs = {k: v["detail"] for k, v in results.items()}
         agg_dfs = {k: v["aggregated"] for k, v in results.items() if not v["aggregated"].empty}
@@ -883,7 +947,9 @@ def _run_job(job_id):
         t = time.time()
         df_store = _combine_dataframes(detail_dfs, False, gc_col, engine) if target != "Company" else pd.DataFrame()
         df_company = _combine_dataframes(agg_dfs, True, gc_col, engine) if target != "Store" and agg_dfs else pd.DataFrame()
-        log.append({"step": "combine", "duration": round(time.time()-t, 2),
+        combine_dur = round(time.time()-t, 2)
+        logger.info(f"[Job {job_id}] Combined in {combine_dur}s — store: {len(df_store):,} rows/{len(df_store.columns) if not df_store.empty else 0} cols, company: {len(df_company):,} rows/{len(df_company.columns) if not df_company.empty else 0} cols")
+        log.append({"step": "combine", "duration": combine_dur,
                      "store_cols": len(df_store.columns) if not df_store.empty else 0,
                      "company_cols": len(df_company.columns) if not df_company.empty else 0})
 
@@ -906,12 +972,9 @@ def _run_job(job_id):
         if not df_store.empty:
             store_file = os.path.join(tmp_dir, f"{job_id}_store.pkl")
             df_store.to_pickle(store_file)
-            # Pre-generate CSV for instant download
-            df_store.to_csv(store_file.replace('.pkl', '.csv'), index=False)
         if not df_company.empty:
             company_file = os.path.join(tmp_dir, f"{job_id}_company.pkl")
             df_company.to_pickle(company_file)
-            df_company.to_csv(company_file.replace('.pkl', '.csv'), index=False)
         log.append({"step": "save_temp", "duration": round(time.time()-t, 2)})
 
         # Mark as COMPLETED now — user can view preview + download
@@ -930,28 +993,73 @@ def _run_job(job_id):
             company_file=company_file,
         )
 
-        # ── Save to DB in background AFTER marking complete ──
+        # ── Save to DB AFTER marking complete (with retry) ──
         if payload.get("save_to_db"):
-            _update_job(job_id, progress="saving to database (background)...")
+            _update_job(job_id, progress="saving to database...")
             month_tag = datetime.now().strftime('%Y_%m')
             safe_gc = gc_col.upper().replace(' ','_').replace('-','_')
-            if not df_store.empty:
-                t = time.time()
-                tbl = f"{TABLE_PREFIX}_{safe_gc}_{month_tag}"
-                _save_to_db(engine, df_store, tbl)
-                log.append({"action": "saved_store", "table": tbl, "rows": len(df_store),
-                             "duration": round(time.time()-t, 2)})
-            if not df_company.empty:
-                t = time.time()
-                tbl = f"{TABLE_PREFIX}_{safe_gc}_CO_{month_tag}"
-                _save_to_db(engine, df_company, tbl)
-                log.append({"action": "saved_company", "table": tbl, "rows": len(df_company),
-                             "duration": round(time.time()-t, 2)})
-            total_dur = round(time.time()-t0, 2)
-            _update_job(job_id, persist=True, log=log, duration=total_dur, progress="done")
+
+            def _make_progress_cb(label):
+                def cb(inserted, total):
+                    _update_job(job_id, progress=f"saving {label}: {inserted:,}/{total:,} rows")
+                return cb
+
+            try:
+                if not df_store.empty:
+                    t = time.time()
+                    tbl = f"{TABLE_PREFIX}_{safe_gc}_{month_tag}"
+                    logger.info(f"[Job {job_id}] Saving store to DB: {tbl} ({len(df_store):,} rows)")
+                    _save_to_db(engine, df_store, tbl, retries=3, progress_cb=_make_progress_cb("store"))
+                    dur_s = round(time.time()-t, 2)
+                    logger.info(f"[Job {job_id}] Store saved in {dur_s}s")
+                    log.append({"action": "saved_store", "table": tbl, "rows": len(df_store),
+                                 "duration": dur_s})
+                if not df_company.empty:
+                    t = time.time()
+                    tbl = f"{TABLE_PREFIX}_{safe_gc}_CO_{month_tag}"
+                    logger.info(f"[Job {job_id}] Saving company to DB: {tbl} ({len(df_company):,} rows)")
+                    _save_to_db(engine, df_company, tbl, retries=3, progress_cb=_make_progress_cb("company"))
+                    dur_c = round(time.time()-t, 2)
+                    logger.info(f"[Job {job_id}] Company saved in {dur_c}s")
+                    log.append({"action": "saved_company", "table": tbl, "rows": len(df_company),
+                                 "duration": dur_c})
+                total_dur = round(time.time()-t0, 2)
+                _update_job(job_id, persist=True, log=log, duration=total_dur, progress="saved to DB")
+            except Exception as save_err:
+                logger.error(f"[Job {job_id}] Save to DB failed after retries: {save_err}")
+                log.append({"action": "save_error", "error": str(save_err)[:500]})
+                _update_job(job_id, persist=True, log=log, progress="save failed")
 
     except Exception as e:
+        logger.error(f"[Job {job_id}] FAILED: {e}")
         _update_job(job_id, persist=True, status="failed", error=str(e)[:1000], finished_at=datetime.now().isoformat())
+
+
+JOB_AUTO_DELETE_DELAY = 60  # seconds after completion before auto-delete
+
+def _auto_delete_job(job_id, delay=JOB_AUTO_DELETE_DELAY):
+    """Auto-delete a completed/failed job after a delay to allow frontend to fetch results."""
+    time.sleep(delay)
+    with _job_lock:
+        job = _jobs.pop(job_id, None)
+        if job_id in _job_queue:
+            _job_queue.remove(job_id)
+    if job:
+        # Clean up temp files
+        for key in ("store_file", "company_file"):
+            path = job.get(key)
+            if path and os.path.exists(path):
+                try: os.remove(path)
+                except: pass
+        # Delete from DB
+        try:
+            engine = get_data_engine()
+            with engine.connect() as conn:
+                conn.execute(text(f"DELETE FROM {JOB_TABLE} WHERE job_id = :jid"), {"jid": job_id})
+                conn.commit()
+        except Exception:
+            pass
+        logger.info(f"[Job {job_id}] Auto-deleted after {delay}s")
 
 
 def _start_job(job_id):
@@ -962,6 +1070,11 @@ def _start_job(job_id):
             if job_id in _job_queue:
                 _job_queue.remove(job_id)
         gc.collect()
+        # Schedule auto-delete after completion
+        with _job_lock:
+            job = _jobs.get(job_id)
+        if job and job.get("status") in ("completed", "failed", "cancelled"):
+            threading.Thread(target=_auto_delete_job, args=(job_id,), daemon=True).start()
     t = threading.Thread(target=wrapper, daemon=True)
     t.start()
 
@@ -995,6 +1108,7 @@ def execute_pipeline(payload: ExecutePayload, current_user: User = Depends(get_c
         _job_queue.append(job_id)
 
     _start_job(job_id)
+    logger.info(f"[Job {job_id}] Created — grouping={payload.grouping_column}, presets={presets_label}, save_to_db={payload.save_to_db}, target={payload.target}")
 
     return APIResponse(success=True, message=f"Job {job_id} started", data={"job_id": job_id})
 
@@ -1002,6 +1116,7 @@ def execute_pipeline(payload: ExecutePayload, current_user: User = Depends(get_c
 @router.get("/jobs", response_model=APIResponse)
 def list_jobs(current_user: User = Depends(get_current_user)):
     """List all jobs (most recent first)."""
+    _lazy_load_jobs()
     with _job_lock:
         jobs = list(reversed(_jobs.values()))
     # Return summary without heavy preview data
@@ -1037,6 +1152,7 @@ def cancel_job(job_id: str, current_user: User = Depends(get_current_user)):
         if job["status"] in ("pending", "running", "paused"):
             job["status"] = "cancelled"
             job["finished_at"] = datetime.now().isoformat()
+            logger.info(f"[Job {job_id}] Cancelled")
     return APIResponse(success=True, message=f"Job {job_id} cancelled")
 
 
@@ -1066,42 +1182,128 @@ def resume_job(job_id: str, current_user: User = Depends(get_current_user)):
 
 MAX_ROWS_PER_FILE = 800_000
 
+def _download_from_table(table_name, label):
+    """Download from DB table — split by DIV/SEG for large files. Used by both Execute and Review."""
+    engine = get_data_engine()
+
+    with engine.connect() as conn:
+        total = conn.execute(text(f"SELECT COUNT(*) FROM [{table_name}] WITH (NOLOCK)")).scalar()
+
+    if total <= MAX_ROWS_PER_FILE:
+        def csv_stream():
+            first = True
+            for chunk in pd.read_sql(f"SELECT * FROM [{table_name}] WITH (NOLOCK)", engine, chunksize=100000):
+                yield chunk.to_csv(index=False, header=first)
+                first = False
+        return StreamingResponse(csv_stream(), media_type="text/csv",
+            headers={"Content-Disposition": f"attachment; filename={label}.csv"})
+    else:
+        # Split by SEG/DIV
+        with engine.connect() as conn:
+            cols = [r[0] for r in conn.execute(text(f"SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='{table_name}'")).fetchall()]
+        has_seg = 'SEG' in cols
+        has_div = 'DIV' in cols
+
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zf:
+            if has_seg and has_div:
+                segs = pd.read_sql(f"SELECT DISTINCT SEG FROM [{table_name}] WITH (NOLOCK)", engine)['SEG'].tolist()
+                for seg_val in segs:
+                    s_seg = re.sub(r'[^A-Za-z0-9_-]', '_', str(seg_val))[:30]
+                    if str(seg_val).upper() == 'GM':
+                        parts = []
+                        for chunk in pd.read_sql(f"SELECT * FROM [{table_name}] WITH (NOLOCK) WHERE SEG='{seg_val}'", engine, chunksize=100000):
+                            parts.append(chunk.to_csv(index=False, header=len(parts)==0))
+                        zf.writestr(f"{label}_SEG_{s_seg}.csv", "".join(parts))
+                    else:
+                        divs = pd.read_sql(f"SELECT DISTINCT DIV FROM [{table_name}] WITH (NOLOCK) WHERE SEG='{seg_val}'", engine)['DIV'].tolist()
+                        for div_val in divs:
+                            s_div = re.sub(r'[^A-Za-z0-9_-]', '_', str(div_val))[:30]
+                            parts = []
+                            for chunk in pd.read_sql(f"SELECT * FROM [{table_name}] WITH (NOLOCK) WHERE SEG='{seg_val}' AND DIV='{div_val}'", engine, chunksize=100000):
+                                parts.append(chunk.to_csv(index=False, header=len(parts)==0))
+                            zf.writestr(f"{label}_{s_seg}_{s_div}.csv", "".join(parts))
+            elif has_div:
+                divs = pd.read_sql(f"SELECT DISTINCT DIV FROM [{table_name}] WITH (NOLOCK)", engine)['DIV'].tolist()
+                for div_val in divs:
+                    s_div = re.sub(r'[^A-Za-z0-9_-]', '_', str(div_val))[:30]
+                    parts = []
+                    for chunk in pd.read_sql(f"SELECT * FROM [{table_name}] WITH (NOLOCK) WHERE DIV='{div_val}'", engine, chunksize=100000):
+                        parts.append(chunk.to_csv(index=False, header=len(parts)==0))
+                    zf.writestr(f"{label}_{s_div}.csv", "".join(parts))
+            else:
+                parts = []
+                for chunk in pd.read_sql(f"SELECT * FROM [{table_name}] WITH (NOLOCK)", engine, chunksize=100000):
+                    parts.append(chunk.to_csv(index=False, header=len(parts)==0))
+                zf.writestr(f"{label}.csv", "".join(parts))
+        buf.seek(0)
+        return StreamingResponse(buf, media_type="application/zip",
+            headers={"Content-Disposition": f"attachment; filename={label}.zip"})
+
+
 @router.get("/jobs/{job_id}/download/{result_type}")
 def download_job_result(job_id: str, result_type: str,
                         current_user: User = Depends(get_current_user)):
-    """Stream CSV directly from pickle file — fast download."""
+    """Download job result — from pkl if available, else from DB table."""
+    logger.info(f"[Job {job_id}] Download requested: {result_type}")
     with _job_lock:
         job = _jobs.get(job_id)
-    if not job:
-        raise HTTPException(404, "Job not found")
-    if job["status"] != "completed":
-        raise HTTPException(400, "Job not completed yet")
 
-    file_key = "store_file" if result_type == "store" else "company_file"
-    pkl_path = job.get(file_key)
-    if not pkl_path or not os.path.exists(pkl_path):
-        raise HTTPException(404, f"No {result_type} result file found")
+    # Try pkl file first (fast, local)
+    if job:
+        file_key = "store_file" if result_type == "store" else "company_file"
+        pkl_path = job.get(file_key)
+        if pkl_path and os.path.exists(pkl_path):
+            label = f"contrib_{result_type}_{job_id}"
+            df = pd.read_pickle(pkl_path)
+            if len(df) <= MAX_ROWS_PER_FILE:
+                def csv_stream():
+                    yield df.head(0).to_csv(index=False)
+                    for i in range(0, len(df), 100000):
+                        yield df.iloc[i:i+100000].to_csv(index=False, header=False)
+                return StreamingResponse(csv_stream(), media_type="text/csv",
+                    headers={"Content-Disposition": f"attachment; filename={label}.csv"})
+            else:
+                # Large file — write split ZIP
+                buf = io.BytesIO()
+                has_seg = 'SEG' in df.columns
+                has_div = 'DIV' in df.columns
+                with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zf:
+                    if has_seg and has_div:
+                        for seg_val, seg_grp in df.groupby('SEG'):
+                            s_seg = re.sub(r'[^A-Za-z0-9_-]', '_', str(seg_val))[:30]
+                            if str(seg_val).upper() == 'GM':
+                                zf.writestr(f"{label}_SEG_{s_seg}.csv", seg_grp.to_csv(index=False))
+                            else:
+                                for div_val, div_grp in seg_grp.groupby('DIV'):
+                                    s_div = re.sub(r'[^A-Za-z0-9_-]', '_', str(div_val))[:30]
+                                    zf.writestr(f"{label}_{s_seg}_{s_div}.csv", div_grp.to_csv(index=False))
+                    elif has_div:
+                        for div_val, grp in df.groupby('DIV'):
+                            s_div = re.sub(r'[^A-Za-z0-9_-]', '_', str(div_val))[:30]
+                            zf.writestr(f"{label}_{s_div}.csv", grp.to_csv(index=False))
+                    else:
+                        for i in range(0, len(df), MAX_ROWS_PER_FILE):
+                            zf.writestr(f"{label}_part{i//MAX_ROWS_PER_FILE+1}.csv",
+                                        df.iloc[i:i+MAX_ROWS_PER_FILE].to_csv(index=False))
+                buf.seek(0)
+                return StreamingResponse(buf, media_type="application/zip",
+                    headers={"Content-Disposition": f"attachment; filename={label}.zip"})
 
-    label = f"contrib_{result_type}_{job_id}"
+    # Fallback: read from DB table (after auto-delete or restart)
+    gc_col = job.get("payload", {}).get("grouping_column", "MACRO_MVGR") if job else "MACRO_MVGR"
+    month_tag = datetime.now().strftime('%Y_%m')
+    safe_gc = gc_col.upper().replace(' ','_').replace('-','_')
+    if result_type == "company":
+        table_name = f"{TABLE_PREFIX}_{safe_gc}_CO_{month_tag}"
+    else:
+        table_name = f"{TABLE_PREFIX}_{safe_gc}_{month_tag}"
 
-    # Check if pre-generated CSV exists (created during job save)
-    csv_path = pkl_path.replace('.pkl', '.csv')
-    if os.path.exists(csv_path):
-        # Stream pre-generated file directly — instant
-        return StreamingResponse(
-            open(csv_path, 'rb'),
-            media_type="text/csv",
-            headers={"Content-Disposition": f"attachment; filename={label}.csv"})
-
-    # Fallback: generate from pickle with streaming chunks
-    def csv_stream():
-        df = pd.read_pickle(pkl_path)
-        yield ','.join(str(c) for c in df.columns) + '\n'
-        for i in range(0, len(df), 50000):
-            yield df.iloc[i:i+50000].to_csv(index=False, header=False)
-
-    return StreamingResponse(csv_stream(), media_type="text/csv",
-        headers={"Content-Disposition": f"attachment; filename={label}.csv"})
+    label = f"contrib_{result_type}"
+    try:
+        return _download_from_table(table_name, label)
+    except Exception as e:
+        raise HTTPException(500, f"Download failed: {str(e)[:200]}")
 
 
 @router.delete("/jobs/{job_id}", response_model=APIResponse)
@@ -1112,16 +1314,29 @@ def delete_job(job_id: str, current_user: User = Depends(get_current_user)):
         if job_id in _job_queue:
             _job_queue.remove(job_id)
     if not job:
-        raise HTTPException(404, "Job not found")
+        # Still try to delete from DB even if not in memory
+        pass
+
     # Clean up temp files
-    for key in ("store_file", "company_file"):
-        path = job.get(key)
-        if path:
-            for ext in ('', '.csv'):
-                f = path if not ext else path.replace('.pkl', ext)
-                if f and os.path.exists(f):
-                    try: os.remove(f)
-                    except: pass
+    if job:
+        for key in ("store_file", "company_file"):
+            path = job.get(key)
+            if path:
+                for ext in ('', '.csv'):
+                    f = path if not ext else path.replace('.pkl', ext)
+                    if f and os.path.exists(f):
+                        try: os.remove(f)
+                        except: pass
+
+    # Delete from DB
+    try:
+        engine = get_data_engine()
+        with engine.connect() as conn:
+            conn.execute(text(f"DELETE FROM {JOB_TABLE} WHERE job_id = :jid"), {"jid": job_id})
+            conn.commit()
+    except Exception:
+        pass
+
     return APIResponse(success=True, message=f"Job {job_id} deleted")
 
 
@@ -1141,20 +1356,60 @@ def list_result_tables(current_user: User = Depends(get_current_user)):
     return APIResponse(success=True, data={"tables": tables, "total": len(tables)})
 
 
+FILTER_COLUMNS = ['ST_CD', 'ST_NM', 'SEG', 'DIV', 'SUB_DIV', 'MAJ_CAT', 'SSN', 'ACT_INACT', 'STATUS']
+
 @router.get("/review/preview/{table_name}", response_model=APIResponse)
-def preview_table(table_name: str, limit: int = Query(500),
+def preview_table(table_name: str, request: Request, limit: int = Query(500),
                   current_user: User = Depends(get_current_user)):
+    """Preview table with optional server-side filters.
+    Filters passed as query params: f_SEG=APP,GM&f_MAJ_CAT=FW_W_SHOES
+    """
     if not table_name.upper().startswith(TABLE_PREFIX.upper()):
         raise HTTPException(400, "Invalid table name")
     engine = get_data_engine()
     safe = table_name.replace("'","").replace(";","")
-    df = pd.read_sql(f"SELECT TOP {limit} * FROM [{safe}]", engine)
+
+    # Get all columns in this table
+    with engine.connect() as conn:
+        all_cols = {r[0] for r in conn.execute(text(
+            f"SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='{safe}'"
+        )).fetchall()}
+
+    # Parse filters from query params (f_COL=val1,val2)
+    filters = {}
+    for key, val in request.query_params.items():
+        if key.startswith("f_") and val:
+            col = key[2:]
+            if col in all_cols:
+                filters[col] = [v.strip() for v in val.split(",") if v.strip()]
+
+    where = _build_where_clause(filters, all_cols)
+    where_sql = f" WHERE {where}" if where else ""
+
+    df = pd.read_sql(f"SELECT TOP {limit} * FROM [{safe}] WITH (NOLOCK){where_sql}", engine)
+    for c in df.select_dtypes(include=['float64', 'float32', 'float']).columns:
+        df[c] = df[c].round(4)
+
     with engine.connect() as c:
-        total = c.execute(text(f"SELECT COUNT(*) FROM [{safe}]")).scalar()
+        total = c.execute(text(f"SELECT COUNT(*) FROM [{safe}] WITH (NOLOCK)")).scalar()
+        filtered_total = c.execute(text(f"SELECT COUNT(*) FROM [{safe}] WITH (NOLOCK){where_sql}")).scalar() if where else total
+
+    # Build filter options: distinct values from the FULL table (always unfiltered)
+    filter_options = {}
+    for fc in FILTER_COLUMNS:
+        if fc in all_cols:
+            try:
+                vals = pd.read_sql(f"SELECT DISTINCT [{fc}] FROM [{safe}] WITH (NOLOCK) WHERE [{fc}] IS NOT NULL ORDER BY [{fc}]", engine)
+                filter_options[fc] = vals[fc].astype(str).tolist()
+            except Exception:
+                pass
+
     return APIResponse(success=True,
         data={
             "columns": list(df.columns), "total_rows": total,
+            "filtered_rows": filtered_total,
             "preview": json.loads(df.to_json(orient="records", date_format="iso")),
+            "filter_options": filter_options,
         })
 
 
@@ -1162,70 +1417,8 @@ def preview_table(table_name: str, limit: int = Query(500),
 def download_table(table_name: str, current_user: User = Depends(get_current_user)):
     if not table_name.upper().startswith(TABLE_PREFIX.upper()):
         raise HTTPException(400, "Invalid table name")
-    engine = get_data_engine()
     safe = table_name.replace("'","").replace(";","")
-
-    # Get row count and column info first (lightweight)
-    with engine.connect() as conn:
-        total = conn.execute(text(f"SELECT COUNT(*) FROM [{safe}]")).scalar()
-        cols_r = conn.execute(text(f"SELECT TOP 1 * FROM [{safe}]")).keys()
-        col_names = list(cols_r)
-
-    has_seg = 'SEG' in col_names
-    has_div = 'DIV' in col_names
-
-    if total <= MAX_ROWS_PER_FILE:
-        # Stream as single CSV in chunks (no full memory load)
-        def csv_gen():
-            first = True
-            for chunk in pd.read_sql(f"SELECT * FROM [{safe}]", engine, chunksize=50000):
-                yield chunk.to_csv(index=False, header=first, encoding='utf-8-sig')
-                first = False
-        return StreamingResponse(csv_gen(), media_type="text/csv",
-            headers={"Content-Disposition": f"attachment; filename={safe}.csv"})
-    else:
-        # Large table: read by SEG/DIV groups directly from DB → ZIP of CSVs
-        buf = io.BytesIO()
-        with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zf:
-            if has_seg and has_div:
-                # Get distinct SEG values
-                segs = pd.read_sql(f"SELECT DISTINCT SEG FROM [{safe}]", engine)['SEG'].tolist()
-                for seg_val in segs:
-                    s_seg = re.sub(r'[^A-Za-z0-9_-]', '_', str(seg_val))[:30]
-                    if str(seg_val).upper() == 'GM':
-                        # GM: single file per segment (read in chunks)
-                        parts = []
-                        for chunk in pd.read_sql(f"SELECT * FROM [{safe}] WHERE SEG='{seg_val}'", engine, chunksize=100000):
-                            parts.append(chunk.to_csv(index=False, header=len(parts)==0))
-                        zf.writestr(f"{safe}_SEG_{s_seg}.csv", "".join(parts))
-                    else:
-                        # APP etc: split by DIV
-                        divs = pd.read_sql(f"SELECT DISTINCT DIV FROM [{safe}] WHERE SEG='{seg_val}'", engine)['DIV'].tolist()
-                        for div_val in divs:
-                            s_div = re.sub(r'[^A-Za-z0-9_-]', '_', str(div_val))[:30]
-                            parts = []
-                            for chunk in pd.read_sql(
-                                f"SELECT * FROM [{safe}] WHERE SEG='{seg_val}' AND DIV='{div_val}'",
-                                engine, chunksize=100000):
-                                parts.append(chunk.to_csv(index=False, header=len(parts)==0))
-                            zf.writestr(f"{safe}_{s_seg}_{s_div}.csv", "".join(parts))
-            elif has_div:
-                divs = pd.read_sql(f"SELECT DISTINCT DIV FROM [{safe}]", engine)['DIV'].tolist()
-                for div_val in divs:
-                    s_div = re.sub(r'[^A-Za-z0-9_-]', '_', str(div_val))[:30]
-                    parts = []
-                    for chunk in pd.read_sql(f"SELECT * FROM [{safe}] WHERE DIV='{div_val}'", engine, chunksize=100000):
-                        parts.append(chunk.to_csv(index=False, header=len(parts)==0))
-                    zf.writestr(f"{safe}_{s_div}.csv", "".join(parts))
-            else:
-                # No grouping columns — single chunked CSV
-                parts = []
-                for chunk in pd.read_sql(f"SELECT * FROM [{safe}]", engine, chunksize=100000):
-                    parts.append(chunk.to_csv(index=False, header=len(parts)==0))
-                zf.writestr(f"{safe}.csv", "".join(parts))
-        buf.seek(0)
-        return StreamingResponse(buf, media_type="application/zip",
-            headers={"Content-Disposition": f"attachment; filename={safe}.zip"})
+    return _download_from_table(safe, safe)
 
 
 @router.delete("/review/tables/{table_name}", response_model=APIResponse)
@@ -1237,3 +1430,266 @@ def delete_result_table(table_name: str, current_user: User = Depends(get_curren
     with engine.connect() as c:
         _run(c, f"IF OBJECT_ID('{safe}','U') IS NOT NULL DROP TABLE [{safe}]")
     return APIResponse(success=True, message=f"Table '{safe}' deleted.")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  REVIEW — Background Export Jobs
+# ══════════════════════════════════════════════════════════════════════════════
+
+_export_jobs: OrderedDict = OrderedDict()   # export_id → job dict
+_export_lock = threading.Lock()
+
+def _build_where_clause(filters, table_cols=None):
+    """Build SQL WHERE clause from filter dict. Only includes columns that exist in the table."""
+    clauses = []
+    for col, vals in filters.items():
+        if not vals or not isinstance(vals, list):
+            continue
+        safe_col = col.replace("'", "").replace(";", "")
+        if table_cols and safe_col not in table_cols:
+            continue
+        escaped = [v.replace("'", "''") for v in vals]
+        in_list = ",".join(f"'{v}'" for v in escaped)
+        clauses.append(f"[{safe_col}] IN ({in_list})")
+    return " AND ".join(clauses) if clauses else ""
+
+
+def _run_export_job(export_id):
+    """Background thread: export a table to a file on disk."""
+    with _export_lock:
+        job = _export_jobs.get(export_id)
+        if not job:
+            return
+        job["status"] = "running"
+        job["started_at"] = datetime.now().isoformat()
+
+    table_name = job["table_name"]
+    filters = job.get("filters", {})
+    logger.info(f"[Export {export_id}] Starting export of {table_name}" + (f" filters={filters}" if filters else ""))
+
+    try:
+        engine = get_data_engine()
+        safe = table_name.replace("'", "").replace(";", "")
+
+        # Get table columns for filter validation
+        with engine.connect() as conn:
+            table_cols = [r[0] for r in conn.execute(text(f"SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='{safe}'")).fetchall()]
+
+        # Build WHERE clause from filters
+        where = _build_where_clause(filters, table_cols)
+        where_sql = f" WHERE {where}" if where else ""
+
+        # Get total rows (with filters)
+        with engine.connect() as conn:
+            total = conn.execute(text(f"SELECT COUNT(*) FROM [{safe}] WITH (NOLOCK){where_sql}")).scalar()
+        with _export_lock:
+            job["total_rows"] = total
+        logger.info(f"[Export {export_id}] {table_name}: {total:,} rows to export")
+
+        # Prepare output directory
+        tmp_dir = os.path.join(tempfile.gettempdir(), "contrib_exports")
+        os.makedirs(tmp_dir, exist_ok=True)
+
+        base_query = f"SELECT * FROM [{safe}] WITH (NOLOCK){where_sql}"
+
+        if total <= MAX_ROWS_PER_FILE:
+            # Single CSV file
+            out_path = os.path.join(tmp_dir, f"{export_id}_{safe}.csv")
+            written = 0
+            with open(out_path, 'w', newline='', encoding='utf-8') as f:
+                first = True
+                for chunk in pd.read_sql(base_query, engine, chunksize=100000):
+                    f.write(chunk.to_csv(index=False, header=first))
+                    first = False
+                    written += len(chunk)
+                    with _export_lock:
+                        job["processed_rows"] = written
+            with _export_lock:
+                job["file_path"] = out_path
+                job["file_name"] = f"{safe}.csv"
+                job["content_type"] = "text/csv"
+        else:
+            # ZIP with splits
+            out_path = os.path.join(tmp_dir, f"{export_id}_{safe}.zip")
+            has_seg = 'SEG' in table_cols
+            has_div = 'DIV' in table_cols
+
+            written = 0
+            with zipfile.ZipFile(out_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+                if has_seg and has_div:
+                    seg_query = f"SELECT DISTINCT SEG FROM [{safe}] WITH (NOLOCK){where_sql}"
+                    segs = pd.read_sql(seg_query, engine)['SEG'].tolist()
+                    for seg_val in segs:
+                        s_seg = re.sub(r'[^A-Za-z0-9_-]', '_', str(seg_val))[:30]
+                        seg_where = f"{where} AND " if where else ""
+                        if str(seg_val).upper() == 'GM':
+                            parts = []
+                            for chunk in pd.read_sql(f"SELECT * FROM [{safe}] WITH (NOLOCK) WHERE {seg_where}SEG='{seg_val}'", engine, chunksize=100000):
+                                parts.append(chunk.to_csv(index=False, header=len(parts)==0))
+                                written += len(chunk)
+                                with _export_lock:
+                                    job["processed_rows"] = written
+                            zf.writestr(f"{safe}_SEG_{s_seg}.csv", "".join(parts))
+                        else:
+                            divs = pd.read_sql(f"SELECT DISTINCT DIV FROM [{safe}] WITH (NOLOCK) WHERE {seg_where}SEG='{seg_val}'", engine)['DIV'].tolist()
+                            for div_val in divs:
+                                s_div = re.sub(r'[^A-Za-z0-9_-]', '_', str(div_val))[:30]
+                                parts = []
+                                for chunk in pd.read_sql(f"SELECT * FROM [{safe}] WITH (NOLOCK) WHERE {seg_where}SEG='{seg_val}' AND DIV='{div_val}'", engine, chunksize=100000):
+                                    parts.append(chunk.to_csv(index=False, header=len(parts)==0))
+                                    written += len(chunk)
+                                    with _export_lock:
+                                        job["processed_rows"] = written
+                                zf.writestr(f"{safe}_{s_seg}_{s_div}.csv", "".join(parts))
+                elif has_div:
+                    div_query = f"SELECT DISTINCT DIV FROM [{safe}] WITH (NOLOCK){where_sql}"
+                    divs = pd.read_sql(div_query, engine)['DIV'].tolist()
+                    for div_val in divs:
+                        s_div = re.sub(r'[^A-Za-z0-9_-]', '_', str(div_val))[:30]
+                        div_where = f"{where} AND " if where else ""
+                        parts = []
+                        for chunk in pd.read_sql(f"SELECT * FROM [{safe}] WITH (NOLOCK) WHERE {div_where}DIV='{div_val}'", engine, chunksize=100000):
+                            parts.append(chunk.to_csv(index=False, header=len(parts)==0))
+                            written += len(chunk)
+                            with _export_lock:
+                                job["processed_rows"] = written
+                        zf.writestr(f"{safe}_{s_div}.csv", "".join(parts))
+                else:
+                    parts = []
+                    for chunk in pd.read_sql(base_query, engine, chunksize=100000):
+                        parts.append(chunk.to_csv(index=False, header=len(parts)==0))
+                        written += len(chunk)
+                        with _export_lock:
+                            job["processed_rows"] = written
+                    zf.writestr(f"{safe}.csv", "".join(parts))
+
+            with _export_lock:
+                job["file_path"] = out_path
+                job["file_name"] = f"{safe}.zip"
+                job["content_type"] = "application/zip"
+
+        file_size = os.path.getsize(out_path)
+        with _export_lock:
+            job["status"] = "completed"
+            job["file_size"] = file_size
+            job["finished_at"] = datetime.now().isoformat()
+            job["duration"] = round(time.time() - job["_start_time"], 2)
+        logger.info(f"[Export {export_id}] Completed: {out_path} ({file_size:,} bytes, {job['duration']}s)")
+
+    except Exception as e:
+        logger.error(f"[Export {export_id}] Failed: {e}")
+        with _export_lock:
+            job["status"] = "failed"
+            job["error"] = str(e)[:500]
+            job["finished_at"] = datetime.now().isoformat()
+
+
+class ExportPayload(BaseModel):
+    filters: dict = {}   # { "SEG": ["APP","GM"], "DIV": ["KIDS"] }
+
+@router.post("/review/export/{table_name}", response_model=APIResponse)
+def start_export_job(table_name: str, body: ExportPayload = ExportPayload(),
+                     current_user: User = Depends(get_current_user)):
+    """Start a background export job for a review table with optional filters."""
+    if not table_name.upper().startswith(TABLE_PREFIX.upper()):
+        raise HTTPException(400, "Invalid table name")
+    safe = table_name.replace("'", "").replace(";", "")
+
+    export_id = f"exp_{str(uuid.uuid4())[:8]}"
+    job = {
+        "id": export_id,
+        "table_name": safe,
+        "filters": body.filters,
+        "status": "pending",
+        "total_rows": 0,
+        "processed_rows": 0,
+        "file_path": None,
+        "file_name": None,
+        "content_type": None,
+        "file_size": None,
+        "error": None,
+        "created_at": datetime.now().isoformat(),
+        "started_at": None,
+        "finished_at": None,
+        "duration": None,
+        "_start_time": time.time(),
+    }
+    with _export_lock:
+        _export_jobs[export_id] = job
+
+    t = threading.Thread(target=_run_export_job, args=(export_id,), daemon=True)
+    t.start()
+
+    filter_desc = f" with filters: {body.filters}" if body.filters else ""
+    logger.info(f"[Export {export_id}] Created for table {safe}{filter_desc}")
+    return APIResponse(success=True, message=f"Export job {export_id} started", data={"export_id": export_id})
+
+
+@router.get("/review/exports", response_model=APIResponse)
+def list_export_jobs(current_user: User = Depends(get_current_user)):
+    """List all export jobs (most recent first)."""
+    with _export_lock:
+        jobs = list(reversed(_export_jobs.values()))
+    summaries = []
+    for j in jobs:
+        summaries.append({
+            "id": j["id"], "table_name": j["table_name"], "status": j["status"],
+            "total_rows": j.get("total_rows", 0), "processed_rows": j.get("processed_rows", 0),
+            "file_size": j.get("file_size"), "error": j.get("error"),
+            "created_at": j.get("created_at"), "finished_at": j.get("finished_at"),
+            "duration": j.get("duration"),
+        })
+    return APIResponse(success=True, data={"exports": summaries})
+
+
+@router.get("/review/exports/{export_id}", response_model=APIResponse)
+def get_export_job(export_id: str, current_user: User = Depends(get_current_user)):
+    """Get export job status."""
+    with _export_lock:
+        job = _export_jobs.get(export_id)
+    if not job:
+        raise HTTPException(404, "Export job not found")
+    return APIResponse(success=True, data={"export": {
+        "id": job["id"], "table_name": job["table_name"], "status": job["status"],
+        "total_rows": job.get("total_rows", 0), "processed_rows": job.get("processed_rows", 0),
+        "file_size": job.get("file_size"), "error": job.get("error"),
+        "created_at": job.get("created_at"), "finished_at": job.get("finished_at"),
+        "duration": job.get("duration"),
+    }})
+
+
+@router.get("/review/exports/{export_id}/download")
+def download_export_job(export_id: str, current_user: User = Depends(get_current_user)):
+    """Download completed export file."""
+    with _export_lock:
+        job = _export_jobs.get(export_id)
+    if not job:
+        raise HTTPException(404, "Export job not found")
+    if job["status"] != "completed":
+        raise HTTPException(400, f"Export not ready (status: {job['status']})")
+    if not job.get("file_path") or not os.path.exists(job["file_path"]):
+        raise HTTPException(404, "Export file not found")
+
+    def file_stream():
+        with open(job["file_path"], "rb") as f:
+            while True:
+                chunk = f.read(1024 * 1024)  # 1MB chunks
+                if not chunk:
+                    break
+                yield chunk
+
+    return StreamingResponse(file_stream(), media_type=job.get("content_type", "application/octet-stream"),
+        headers={"Content-Disposition": f"attachment; filename={job['file_name']}"})
+
+
+@router.delete("/review/exports/{export_id}", response_model=APIResponse)
+def delete_export_job(export_id: str, current_user: User = Depends(get_current_user)):
+    """Delete an export job and its file."""
+    with _export_lock:
+        job = _export_jobs.pop(export_id, None)
+    if job and job.get("file_path") and os.path.exists(job["file_path"]):
+        try:
+            os.remove(job["file_path"])
+        except Exception:
+            pass
+    return APIResponse(success=True, message=f"Export {export_id} deleted")

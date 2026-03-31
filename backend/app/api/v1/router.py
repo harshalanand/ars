@@ -38,6 +38,9 @@ from app.api.v1.endpoints.grid_builder import router as grid_builder_router
 # Phase 7: Lookup Art Master
 from app.api.v1.endpoints.lookup_art_master import router as lookup_art_master_router
 
+# Reports
+from app.api.v1.endpoints.reports import router as reports_router
+
 # Phase 6: Dashboard
 from app.api.v1.endpoints.dashboard import router as dashboard_router
 
@@ -80,3 +83,6 @@ api_router.include_router(lookup_art_master_router)
 
 # Phase 6
 api_router.include_router(dashboard_router)
+
+# Reports
+api_router.include_router(reports_router)

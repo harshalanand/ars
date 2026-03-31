@@ -24,12 +24,6 @@ const dataManagementItems = [
   { label: 'Data Editor', path: '/editor', icon: Edit3 },
 ]
 
-// Pending submenu
-const pendingItems = [
-  { label: 'Delivery Order', path: '/pending/delivery-order', icon: Truck },
-  { label: 'Allocation', path: '/pending/allocation', icon: PackageCheck },
-]
-
 // Data Preparation submenu
 const dataPreparationItems = [
   { label: 'MSA Stock Calculation', path: '/msa', icon: BarChart3 },
@@ -44,6 +38,11 @@ const contributionItems = [
   { label: 'Mappings', path: '/contribution/mappings', icon: Columns },
   { label: 'Execute', path: '/contribution/execute', icon: Cpu },
   { label: 'Review', path: '/contribution/review', icon: ClipboardCheck },
+]
+
+// Reports submenu
+const reportsItems = [
+  { label: 'Pending Allocation', path: '/reports/pend-alc', icon: ClipboardCheck },
 ]
 
 // Data Validation submenu
@@ -214,15 +213,6 @@ export default function Sidebar({ collapsed, onToggle }) {
           hasPermission={hasPermission}
         />
 
-        {/* Pending submenu */}
-        <SubMenu
-          title="Pending"
-          icon={Clock}
-          items={pendingItems}
-          collapsed={collapsed}
-          hasPermission={hasPermission}
-        />
-
         {/* Data Preparation submenu */}
         <SubMenu 
           title="Data Preparation" 
@@ -237,6 +227,15 @@ export default function Sidebar({ collapsed, onToggle }) {
           title="Contribution %"
           icon={BarChart3}
           items={contributionItems}
+          collapsed={collapsed}
+          hasPermission={hasPermission}
+        />
+
+        {/* Reports submenu */}
+        <SubMenu
+          title="Reports"
+          icon={Activity}
+          items={reportsItems}
           collapsed={collapsed}
           hasPermission={hasPermission}
         />

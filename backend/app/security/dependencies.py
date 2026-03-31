@@ -1,19 +1,26 @@
 """
 FastAPI Security Dependencies: Authentication, RBAC, RLS
 """
+import time
 from typing import List, Optional, Set
 from functools import wraps
 
 from fastapi import Depends, HTTPException, status, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
+from loguru import logger
 
-from app.database.session import get_db
+from app.database.session import get_db, SystemSessionLocal, system_engine
 from app.security.jwt_handler import verify_access_token
 from app.models.rbac import User, UserRole
 from app.models.rls import UserStoreAccess, UserRegionAccess, Store
 
 bearer_scheme = HTTPBearer()
+
+
+def _is_connection_error(e):
+    err = str(e)
+    return any(code in err for code in ('08S01', '10054', 'Communication link', 'TCP Provider'))
 
 
 # ============================================================================
@@ -24,7 +31,8 @@ async def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
     db: Session = Depends(get_db)
 ) -> User:
-    """Extract and validate current user from JWT token."""
+    """Extract and validate current user from JWT token.
+    Retries once on SQL Server connection drop."""
     token = credentials.credentials
     payload = verify_access_token(token)
 
@@ -42,7 +50,24 @@ async def get_current_user(
             detail="Invalid token payload",
         )
 
-    user = db.query(User).filter(User.username == username, User.is_active == True).first()
+    # Query user with retry on connection drop
+    user = None
+    for attempt in range(2):
+        try:
+            if attempt > 0:
+                # On retry, use a fresh session since the original db session is dead
+                db.close()
+                system_engine.dispose()
+                time.sleep(1)
+                db = SystemSessionLocal()
+            user = db.query(User).filter(User.username == username, User.is_active == True).first()
+            break
+        except Exception as e:
+            if attempt == 0 and _is_connection_error(e):
+                logger.warning(f"Auth DB connection drop, retrying: {str(e)[:150]}")
+                continue
+            raise
+
     if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
