@@ -533,7 +533,7 @@ def _compute_kpis(df, avg_days, grouping_column):
                 'STOCK_CONT%','SALE_CONT%','ALGO','INITIAL AUTO CONT%']
     for col in kpi_cols:
         if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0).round(4)
+            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0).round(2)
     return df
 
 
