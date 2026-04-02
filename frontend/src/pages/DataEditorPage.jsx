@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
-import { Save, Filter, RefreshCw, Download, Trash2, Search, Edit3, X, Loader2, ChevronDown, Play, Database, AlertTriangle, Plus, Check } from 'lucide-react'
-import { tablesAPI, dataAPI } from '@/services/api'
+import { useSearchParams, useNavigate } from 'react-router-dom'
+import { Save, Filter, RefreshCw, Download, Trash2, Search, Edit3, X, Loader2, ChevronDown, Play, Database, AlertTriangle, Plus, Check, ArrowLeft } from 'lucide-react'
+import { tablesAPI, dataAPI, checklistAPI } from '@/services/api'
 import { AgGridReact } from 'ag-grid-react'
 import 'ag-grid-community/styles/ag-grid.css'
 import 'ag-grid-community/styles/ag-theme-alpine.css'
@@ -246,8 +247,11 @@ function AddFilterColumnModal({ columns, existingFilters, onAdd, onClose }) {
 // Main Data Editor Component
 // =============================================================================
 export default function DataEditorPage() {
+  const [searchParams] = useSearchParams()
+  const navigate = useNavigate()
+  const fromChecklist = searchParams.get('from') === 'checklist'
   const [tables, setTables] = useState([])
-  const [selectedTable, setSelectedTable] = useState('')
+  const [selectedTable, setSelectedTable] = useState(searchParams.get('table') || '')
   const [tableSearch, setTableSearch] = useState('')
   const [showTableDropdown, setShowTableDropdown] = useState(false)
   const [schema, setSchema] = useState(null)
@@ -561,9 +565,13 @@ export default function DataEditorPage() {
       }
     }
 
-    if (success > 0) toast.success(`${success} record(s) saved`)
+    if (success > 0) {
+      toast.success(`${success} record(s) saved`)
+      // Auto-stamp checklist so freshness updates
+      checklistAPI.stamp(selectedTable).catch(() => {})
+    }
     if (failed > 0) toast.error(`${failed} failed: ${errors[0]}`)
-    
+
     pendingChangesRef.current.clear()
     setPendingCount(0)
     setChangesVersion(v => v + 1)
@@ -627,9 +635,17 @@ export default function DataEditorPage() {
   return (
     <div className="space-y-4">
       {/* Header */}
-      <div>
-        <h1 className="text-2xl font-bold text-gray-900">Data Editor</h1>
-        <p className="text-gray-500 text-sm">View, filter, edit and save data directly in the browser</p>
+      <div className="flex items-center gap-3">
+        {fromChecklist && (
+          <button onClick={() => navigate('/data-validation/checklist')}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border border-indigo-200 bg-indigo-50 text-indigo-600 hover:bg-indigo-100 transition-colors">
+            <ArrowLeft size={13}/> Back to Checklist
+          </button>
+        )}
+        <div>
+          <h1 className="text-2xl font-bold text-gray-900">Data Editor</h1>
+          <p className="text-gray-500 text-sm">View, filter, edit and save data directly in the browser</p>
+        </div>
       </div>
 
       {/* Table Selection */}

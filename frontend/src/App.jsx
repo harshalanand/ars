@@ -30,6 +30,7 @@ import StoreStockPage from '@/pages/StoreStockPage'
 import GridBuilderPage from '@/pages/GridBuilderPage'
 import LookupArtMasterPage from '@/pages/LookupArtMasterPage'
 import PendAlcReportPage from '@/pages/PendAlcReportPage'
+import ChecklistPage from '@/pages/ChecklistPage'
 
 function ProtectedRoute({ children, permission }) {
   const { isAuthenticated, hasPermission } = useAuthStore()
@@ -69,6 +70,7 @@ export default function App() {
         <Route path="contribution/review" element={<ContribReviewPage />} />
         <Route path="bdc" element={<BDCCreationPage />} />
         <Route path="data-validation/store-sloc" element={<StoreStockPage />} />
+        <Route path="data-validation/checklist" element={<ChecklistPage />} />
         {/* Data Preparation - Store Stock Grid Builder */}
         <Route path="data-prep/store-stock" element={<GridBuilderPage />} />
         <Route path="data-prep/lookup-art-master" element={<LookupArtMasterPage />} />

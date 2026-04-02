@@ -350,6 +350,17 @@ export const contribAPI = {
   deleteExport:     (id)    => api.delete(`/contrib/review/exports/${id}`),
 }
 
+// ============== Data Checklist ==============
+export const checklistAPI = {
+  getItems:         ()           => api.get('/checklist/items'),
+  getAvailableTables: ()         => api.get('/checklist/available-tables'),
+  addItem:          (data)       => api.post('/checklist/items', data),
+  updateItem:       (id, data)   => api.put(`/checklist/items/${id}`, data),
+  reorder:          (items)      => api.put('/checklist/reorder', { items }),
+  stamp:            (tableName)  => api.post(`/checklist/stamp/${encodeURIComponent(tableName)}`),
+  deleteItem:       (id)         => api.delete(`/checklist/items/${id}`),
+}
+
 // ============== Reports ==============
 export const reportsAPI = {
   getPendAlc:         (limit=5000, filters={}) => {

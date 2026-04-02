@@ -8,7 +8,7 @@ import { storeStockAPI } from '@/services/api'
 import toast from 'react-hot-toast'
 import {
   RefreshCw, Save, Search, CheckCircle2, XCircle,
-  AlertTriangle, Database, Sparkles
+  AlertTriangle, Database, Sparkles, Calendar
 } from 'lucide-react'
 
 /* ── Light-theme colour tokens ─────────────────────────────────────────────── */
@@ -120,6 +120,7 @@ export default function StoreStockPage() {
   const [saving,    setSaving]    = useState(false)
   const [search,    setSearch]    = useState('')
   const [filterTab, setFilterTab] = useState('all')
+  const [dataDate,  setDataDate]  = useState(null)  // global max date from ET_STORE_STOCK
 
   // Load merged list (saved + new unsaved SLOCs from ET_STORE_STOCK)
   const loadData = useCallback(async () => {
@@ -127,6 +128,7 @@ export default function StoreStockPage() {
     try {
       const { data } = await storeStockAPI.getSlocSettings()
       setRows(data.data.items || [])
+      setDataDate(data.data.data_date || null)
       setDirty({})
     } catch {} finally { setLoading(false) }
   }, [])
@@ -216,6 +218,43 @@ export default function StoreStockPage() {
           </code>
         </p>
       </div>
+
+      {/* ── Data freshness alert ── */}
+      {!loading && dataDate && (() => {
+        const diffDays = (Date.now() - new Date(dataDate).getTime()) / 86_400_000
+        const isOk = diffDays < 2  // day-1 is OK
+        const dateFmt = new Date(dataDate).toLocaleDateString('en-IN',{day:'2-digit',month:'short',year:'numeric'})
+        return (
+          <div style={{
+            display:'flex', alignItems:'center', gap:10,
+            padding:'8px 14px', marginBottom:12, borderRadius:8,
+            background: isOk ? C.greenBg : C.redBg,
+            border: `1px solid ${isOk ? C.greenBd : C.redBd}`,
+            fontSize:12, color: isOk ? C.green : C.red,
+          }}>
+            {isOk
+              ? <CheckCircle2 size={14} style={{flexShrink:0}}/>
+              : <AlertTriangle size={14} style={{flexShrink:0}}/>}
+            <span>
+              <strong>ET_STORE_STOCK</strong> data date: <strong>{dateFmt}</strong>
+              {isOk
+                ? ' — Data is up to date.'
+                : ` — Data is ${Math.floor(diffDays)} day${Math.floor(diffDays)>1?'s':''} old. Please update the source data.`}
+            </span>
+          </div>
+        )
+      })()}
+      {!loading && !dataDate && rows.length > 0 && (
+        <div style={{
+          display:'flex', alignItems:'center', gap:10,
+          padding:'8px 14px', marginBottom:12, borderRadius:8,
+          background: C.amberBg, border: `1px solid ${C.amberBd}`,
+          fontSize:12, color: C.amber,
+        }}>
+          <AlertTriangle size={14} style={{flexShrink:0}}/>
+          <span><strong>ET_STORE_STOCK</strong> — No date column found. Cannot determine data freshness.</span>
+        </div>
+      )}
 
       {/* ── Card wrapper ── */}
       <div style={{
@@ -374,6 +413,7 @@ export default function StoreStockPage() {
               }}>
                 {[
                   { label:'SLOC',              align:'left',   width:170 },
+                  { label:'REPORT DATE',       align:'center', width:130 },
                   { label:'KPI',               align:'left',   width:null },
                   { label:'ACTIVE / INACTIVE', align:'center', width:190 },
                   { label:'STATUS',            align:'center', width:120 },
@@ -393,7 +433,7 @@ export default function StoreStockPage() {
 
             <tbody>
               {loading ? (
-                <tr><td colSpan={4} style={{textAlign:'center',padding:60,color:C.textMuted}}>
+                <tr><td colSpan={5} style={{textAlign:'center',padding:60,color:C.textMuted}}>
                   <RefreshCw size={18} style={{
                     display:'block', margin:'0 auto 8px',
                     animation:'spin 1s linear infinite',
@@ -401,7 +441,7 @@ export default function StoreStockPage() {
                   Loading SLOC data…
                 </td></tr>
               ) : visible.length===0 ? (
-                <tr><td colSpan={4} style={{textAlign:'center',padding:60,color:C.textMuted}}>
+                <tr><td colSpan={5} style={{textAlign:'center',padding:60,color:C.textMuted}}>
                   No SLOC records found.
                 </td></tr>
               ) : visible.map((row, idx) => {
@@ -437,6 +477,23 @@ export default function StoreStockPage() {
                           }}/>
                         )}
                       </div>
+                    </td>
+
+                    {/* Report Date */}
+                    <td style={{ padding:'7px 18px', textAlign:'center' }}>
+                      {row.report_date ? (
+                        <span style={{
+                          display:'inline-flex', alignItems:'center', gap:4,
+                          fontSize:12, color: C.textSub, fontWeight:500,
+                        }}>
+                          <Calendar size={11} style={{flexShrink:0, color:C.textMuted}}/>
+                          {new Date(row.report_date).toLocaleDateString('en-IN', {
+                            day:'2-digit', month:'short', year:'numeric',
+                          })}
+                        </span>
+                      ) : (
+                        <span style={{ fontSize:11, color:C.textMuted }}>—</span>
+                      )}
                     </td>
 
                     {/* KPI input */}

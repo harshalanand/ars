@@ -146,21 +146,88 @@ def _ensure_table(engine):
         """)
 
 
-def _fetch_distinct_slocs(data_engine) -> List[str]:
+def _find_date_column(engine) -> Optional[str]:
+    """Return the date column in ET_STORE_STOCK — by type first, then by name."""
     try:
+        with engine.connect() as conn:
+            # 1) Try columns with date/datetime type
+            row = conn.execute(text("""
+                SELECT TOP 1 COLUMN_NAME
+                FROM INFORMATION_SCHEMA.COLUMNS
+                WHERE TABLE_NAME = 'ET_STORE_STOCK'
+                  AND DATA_TYPE IN ('date','datetime','datetime2','smalldatetime')
+                ORDER BY ORDINAL_POSITION
+            """)).fetchone()
+            if row:
+                return row[0]
+
+            # 2) Try well-known date column names (any type — could be varchar)
+            row = conn.execute(text("""
+                SELECT TOP 1 COLUMN_NAME
+                FROM INFORMATION_SCHEMA.COLUMNS
+                WHERE TABLE_NAME = 'ET_STORE_STOCK'
+                  AND UPPER(COLUMN_NAME) IN ('DATE','BUDAT','ERDAT','REPORT_DATE',
+                       'POSTING_DATE','DOC_DATE','CREATED_DATE','UPDATED_AT')
+                ORDER BY ORDINAL_POSITION
+            """)).fetchone()
+            if row:
+                return row[0]
+
+        return None
+    except Exception as e:
+        logger.warning(f"_find_date_column error: {e}")
+        return None
+
+
+def _safe_iso(val) -> Optional[str]:
+    """Convert a date value (could be date, datetime, or string) to ISO string."""
+    if val is None:
+        return None
+    if hasattr(val, 'isoformat'):
+        return val.isoformat()
+    # Try parsing string dates
+    s = str(val).strip()
+    if not s:
+        return None
+    try:
+        from datetime import datetime
+        for fmt in ('%Y-%m-%d', '%Y%m%d', '%d/%m/%Y', '%d-%m-%Y', '%Y-%m-%d %H:%M:%S'):
+            try:
+                return datetime.strptime(s, fmt).date().isoformat()
+            except ValueError:
+                continue
+    except Exception:
+        pass
+    return s  # Return as-is if can't parse
+
+
+def _fetch_distinct_slocs(data_engine) -> List[dict]:
+    """Return list of {sloc, report_date} from ET_STORE_STOCK."""
+    try:
+        date_col = _find_date_column(data_engine)
         with data_engine.connect() as conn:
-            rows = conn.execute(text(
-                "SELECT DISTINCT sloc FROM ET_STORE_STOCK ORDER BY sloc ASC"
-            )).fetchall()
-        slocs = [str(r[0]) for r in rows if r[0] is not None]
+            if date_col:
+                rows = conn.execute(text(
+                    f"SELECT sloc, MAX([{date_col}]) AS report_date "
+                    f"FROM ET_STORE_STOCK GROUP BY sloc ORDER BY sloc ASC"
+                )).fetchall()
+                slocs = [{"sloc": str(r[0]), "report_date": _safe_iso(r[1])}
+                         for r in rows if r[0] is not None]
+            else:
+                rows = conn.execute(text(
+                    "SELECT DISTINCT sloc FROM ET_STORE_STOCK ORDER BY sloc ASC"
+                )).fetchall()
+                slocs = [{"sloc": str(r[0]), "report_date": None}
+                         for r in rows if r[0] is not None]
 
         # Add PEND_ALC as virtual SLOC if ARS_pend_alc table exists
         with data_engine.connect() as conn:
             pend_exists = conn.execute(text(
                 "SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME='ARS_pend_alc'"
             )).scalar()
-            if pend_exists and 'PEND_ALC' not in slocs:
-                slocs.append('PEND_ALC')
+            existing = {s["sloc"] for s in slocs}
+            if pend_exists and 'PEND_ALC' not in existing:
+                slocs.append({"sloc": "PEND_ALC", "report_date": None})
 
         return slocs
     except Exception as e:
@@ -205,18 +272,28 @@ def get_sloc_settings(current_user: User = Depends(get_current_user)):
     except Exception as e:
         raise HTTPException(500, detail=f"Failed to read {TABLE}: {e}")
 
+    # slocs is now a list of {"sloc": ..., "report_date": ...}
+    sloc_dates = {s["sloc"]: s["report_date"] for s in slocs}
+
     result = []
-    for sloc in slocs:
-        if sloc in saved:
-            result.append({**saved[sloc], "is_new": False})
+    for entry in slocs:
+        s = entry["sloc"]
+        if s in saved:
+            result.append({**saved[s], "report_date": entry["report_date"], "is_new": False})
         else:
-            result.append({"id": None, "sloc": sloc, "kpi": None, "status": "New",
+            result.append({"id": None, "sloc": s, "kpi": None, "status": "New",
+                           "report_date": entry["report_date"],
                            "created_at": None, "updated_at": None, "is_new": True})
 
     new_count = sum(1 for r in result if r["is_new"])
+
+    # Global max date across all SLOCs for freshness alert
+    all_dates = [e["report_date"] for e in slocs if e["report_date"]]
+    data_date = max(all_dates) if all_dates else None
+
     return APIResponse(success=True,
         message=f"Loaded {len(result)} SLOC entries ({new_count} new)",
-        data={"items": result, "total": len(result)})
+        data={"items": result, "total": len(result), "data_date": data_date})
 
 
 @router.post("/sync", response_model=APIResponse)
@@ -236,7 +313,7 @@ def sync_slocs(current_user: User = Depends(get_current_user)):
         raise HTTPException(500, detail=f"Failed to read ET_STORE_STOCK: {e}")
 
     saved     = _fetch_saved(de)
-    new_slocs = [s for s in slocs if s not in saved]
+    new_slocs = [s["sloc"] for s in slocs if s["sloc"] not in saved]
 
     return APIResponse(success=True,
         message=f"Sync check complete. {len(new_slocs)} new SLOC(s) found.",

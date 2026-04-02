@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback, useMemo } from 'react'
-import { useParams, Link } from 'react-router-dom'
+import { useParams, Link, useSearchParams } from 'react-router-dom'
 import { ArrowLeft, Download, Columns, RefreshCw } from 'lucide-react'
 import { tablesAPI, dataAPI } from '@/services/api'
 import { AgGridReact } from 'ag-grid-react'
@@ -10,6 +10,8 @@ import useAuthStore from '@/store/authStore'
 
 export default function TableDataPage() {
   const { tableName } = useParams()
+  const [searchParams] = useSearchParams()
+  const fromChecklist = searchParams.get('from') === 'checklist'
   const [schema, setSchema] = useState(null)
   const [rowData, setRowData] = useState([])
   const [total, setTotal] = useState(0)
@@ -87,7 +89,7 @@ export default function TableDataPage() {
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
-          <Link to="/tables" className="p-2 hover:bg-gray-100 rounded-lg"><ArrowLeft size={18} /></Link>
+          <Link to={fromChecklist ? "/data-validation/checklist" : "/tables"} className="p-2 hover:bg-gray-100 rounded-lg"><ArrowLeft size={18} /></Link>
           <div>
             <h1 className="text-xl font-bold text-gray-900">{schema?.display_name || tableName}</h1>
             <div className="flex items-center gap-3 text-sm text-gray-500">

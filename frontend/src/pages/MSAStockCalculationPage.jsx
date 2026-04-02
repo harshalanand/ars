@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Calculator, Filter, Calendar, Save, Plus, Trash2, Download, X, ChevronDown } from 'lucide-react';
+import { Calculator, Filter, Calendar, Save, Plus, Trash2, Download, X, ChevronDown, CheckCircle2, AlertTriangle } from 'lucide-react';
 import { msaAPI } from '../services/api';
 import toast from 'react-hot-toast';
 import CascadingFilters from '../components/filters/CascadingFilters';
@@ -789,6 +789,25 @@ export default function MSAStockCalculationPage() {
           </div>
         </div>
       </div>
+
+      {/* Data freshness alert */}
+      {availableDates.length > 0 && (() => {
+        const latest = availableDates[0]
+        const diffDays = (Date.now() - new Date(latest).getTime()) / 86_400_000
+        const isOk = diffDays < 2
+        const dateFmt = new Date(latest).toLocaleDateString('en-IN',{day:'2-digit',month:'short',year:'numeric'})
+        return (
+          <div className={`flex items-center gap-2.5 px-3.5 py-2 rounded-lg text-xs font-medium border ${isOk ? 'bg-emerald-50 border-emerald-200 text-emerald-700' : 'bg-red-50 border-red-200 text-red-700'}`}>
+            {isOk ? <CheckCircle2 size={14}/> : <AlertTriangle size={14}/>}
+            <span>
+              <strong>VW_ET_MSA_STK_WITH_MASTER</strong> data date: <strong>{dateFmt}</strong>
+              {isOk
+                ? ' — Data is up to date.'
+                : ` — Data is ${Math.floor(diffDays)} day${Math.floor(diffDays)>1?'s':''} old. Please update the source data.`}
+            </span>
+          </div>
+        )
+      })()}
 
       {/* Filter Configuration Card */}
       <div className="card">

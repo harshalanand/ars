@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from 'react'
-import { Upload, FileSpreadsheet, Eye, ArrowRight, Check, AlertCircle, Download, Trash2, Edit3, Lock, Unlock, Loader2, Clock, RefreshCw, List, X, StopCircle, ChevronDown } from 'lucide-react'
-import { uploadAPI, tablesAPI } from '@/services/api'
+import { useSearchParams, useNavigate } from 'react-router-dom'
+import { Upload, FileSpreadsheet, Eye, ArrowRight, Check, AlertCircle, Download, Trash2, Edit3, Lock, Unlock, Loader2, Clock, RefreshCw, List, X, StopCircle, ChevronDown, ArrowLeft } from 'lucide-react'
+import { uploadAPI, tablesAPI, checklistAPI } from '@/services/api'
 import toast from 'react-hot-toast'
 
 // Dropdown with search and keyboard navigation - Using input-based approach like DataEditorPage
@@ -147,10 +148,13 @@ function SearchDropdown({ options, value, onChange, placeholder, icon: Icon }) {
 }
 
 export default function UploadPage() {
+  const [searchParams] = useSearchParams()
+  const navigate = useNavigate()
+  const fromChecklist = searchParams.get('from') === 'checklist'
   const [file, setFile] = useState(null)
   const [tables, setTables] = useState([])
   const [allowedTables, setAllowedTables] = useState([])
-  const [selectedTable, setSelectedTable] = useState('')
+  const [selectedTable, setSelectedTable] = useState(searchParams.get('table') || '')
   const [schema, setSchema] = useState(null)
   const [pkColumns, setPkColumns] = useState('')
   const [preview, setPreview] = useState(null)
@@ -219,6 +223,7 @@ export default function UploadPage() {
             loadJobs()
             if (job.status === 'completed') {
               toast.success(`${mode === 'delete' ? 'Deletion' : 'Upload'} complete!`)
+              checklistAPI.stamp(selectedTable).catch(() => {})
             } else if (job.status === 'cancelled') {
               toast('Job cancelled')
             } else {
@@ -373,6 +378,8 @@ export default function UploadPage() {
         setUploading(false)
         loadJobs()
         toast.success(mode === 'delete' ? 'Deletion complete!' : 'Upload complete!')
+        // Auto-stamp checklist so freshness updates
+        checklistAPI.stamp(selectedTable).catch(() => {})
       }
     } catch (err) {
       toast.error(err.response?.data?.detail || 'Upload failed')
@@ -412,8 +419,20 @@ export default function UploadPage() {
     <div className="h-full flex flex-col overflow-hidden">
       {/* Header */}
       <div className="shrink-0 mb-3">
-        <h1 className="text-lg font-semibold text-gray-900">Upload Data</h1>
-        <p className="text-gray-500 text-xs mt-0.5">Upload CSV or Excel files to update or delete data in database tables</p>
+        <div className="flex items-center gap-3">
+          {fromChecklist && (
+            <button
+              onClick={() => navigate('/data-validation/checklist')}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border border-indigo-200 bg-indigo-50 text-indigo-600 hover:bg-indigo-100 transition-colors"
+            >
+              <ArrowLeft size={13}/> Back to Checklist
+            </button>
+          )}
+          <div>
+            <h1 className="text-lg font-semibold text-gray-900">Upload Data</h1>
+            <p className="text-gray-500 text-xs mt-0.5">Upload CSV or Excel files to update or delete data in database tables</p>
+          </div>
+        </div>
       </div>
 
       {/* Main content - full width */}

@@ -48,6 +48,7 @@ const reportsItems = [
 // Data Validation submenu
 const dataValidationItems = [
   { label: 'Store Sloc Validation', path: '/data-validation/store-sloc', icon: ShieldCheck },
+  { label: 'Data Checklist', path: '/data-validation/checklist', icon: ClipboardCheck },
 ]
 
 // Settings submenu (admin features)
