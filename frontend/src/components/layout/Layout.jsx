@@ -1,6 +1,7 @@
 import { Outlet } from 'react-router-dom'
 import Sidebar from './Sidebar'
 import Header from './Header'
+import Footer from './Footer'
 import { useState } from 'react'
 
 export default function Layout() {
@@ -11,11 +12,12 @@ export default function Layout() {
       <Sidebar collapsed={collapsed} onToggle={() => setCollapsed(!collapsed)} />
       <div className="flex-1 flex flex-col overflow-hidden">
         <Header />
-        <main className="flex-1 overflow-y-auto p-6">
+        <main className="flex-1 overflow-y-auto p-4">
           <div className="animate-fade-in">
             <Outlet />
           </div>
         </main>
+        <Footer />
       </div>
     </div>
   )

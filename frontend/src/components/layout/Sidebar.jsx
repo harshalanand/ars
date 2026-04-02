@@ -68,14 +68,14 @@ function SideLink({ item, collapsed }) {
       end={item.end}
       title={collapsed ? item.label : undefined}
       className={({ isActive }) => clsx(
-        'flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-[12px] font-medium transition-all duration-150',
+        'flex items-center gap-2 px-2.5 py-1.5 rounded-md text-[11px] font-medium transition-all duration-150',
         collapsed && 'justify-center',
         isActive
-          ? 'bg-gradient-to-r from-primary-600 to-primary-500 text-white shadow-lg shadow-primary-600/30'
+          ? 'bg-gradient-to-r from-primary-600 to-primary-500 text-white shadow-md shadow-primary-600/25'
           : 'text-sidebar-text hover:bg-sidebar-hover hover:text-white'
       )}
     >
-      <item.icon size={18} className={!collapsed && 'shrink-0'} />
+      <item.icon size={15} className={!collapsed && 'shrink-0'} />
       {!collapsed && <span>{item.label}</span>}
     </NavLink>
   )
@@ -102,7 +102,7 @@ function SubMenu({ title, icon: Icon, items, collapsed, hasPermission, defaultOp
         <button
           ref={buttonRef}
           className={clsx(
-            'flex items-center justify-center w-full px-2.5 py-2 rounded-lg text-[12px] font-medium transition-all duration-150',
+            'flex items-center justify-center w-full px-2.5 py-1.5 rounded-md text-[11px] font-medium transition-all duration-150',
             'text-sidebar-text hover:bg-sidebar-hover hover:text-white',
             showPopup && 'bg-sidebar-hover text-white'
           )}
@@ -130,7 +130,7 @@ function SubMenu({ title, icon: Icon, items, collapsed, hasPermission, defaultOp
                 key={item.path}
                 to={item.path}
                 className={({ isActive }) => clsx(
-                  'flex items-center gap-2.5 px-3 py-2 text-[12px] transition-all duration-150',
+                  'flex items-center gap-2 px-3 py-1.5 text-[11px] transition-all duration-150',
                   isActive
                     ? 'bg-primary-600/30 text-primary-400 font-medium'
                     : 'text-gray-300 hover:bg-gray-800 hover:text-white'
@@ -152,7 +152,7 @@ function SubMenu({ title, icon: Icon, items, collapsed, hasPermission, defaultOp
       <button
         onClick={() => setOpen(o => !o)}
         className={clsx(
-          'flex items-center justify-between w-full px-2.5 py-2 rounded-lg text-[12px] font-medium transition-all duration-150',
+          'flex items-center justify-between w-full px-2.5 py-1.5 rounded-md text-[11px] font-medium transition-all duration-150',
           'text-sidebar-text hover:bg-sidebar-hover hover:text-white'
         )}
       >
@@ -274,13 +274,24 @@ export default function Sidebar({ collapsed, onToggle }) {
         />
       </nav>
 
-      {/* Collapse toggle */}
-      <button
-        onClick={onToggle}
-        className="flex items-center justify-center py-3 border-t border-gray-800 text-sidebar-text hover:text-white transition-colors"
-      >
-        {collapsed ? <ChevronRight size={18} /> : <ChevronLeft size={18} />}
-      </button>
+      {/* Footer: Version + Collapse */}
+      <div className="border-t border-gray-800 mt-auto">
+        {!collapsed && (
+          <div className="px-3 py-2 space-y-0.5">
+            <div className="text-[9px] font-bold text-gray-500 uppercase tracking-widest">ARS v2.0</div>
+            <div className="text-[8px] text-gray-600">Auto Replenishment System</div>
+            <div className="text-[8px] text-gray-600">Designed & Developed by</div>
+            <div className="text-[9px] font-semibold text-gray-400">Santosh Kumar</div>
+            <div className="text-[7px] text-gray-700 mt-0.5">© {new Date().getFullYear()} All rights reserved</div>
+          </div>
+        )}
+        <button
+          onClick={onToggle}
+          className="flex items-center justify-center w-full py-2 border-t border-gray-800 text-sidebar-text hover:text-white transition-colors"
+        >
+          {collapsed ? <ChevronRight size={16} /> : <ChevronLeft size={16} />}
+        </button>
+      </div>
     </aside>
   )
 }

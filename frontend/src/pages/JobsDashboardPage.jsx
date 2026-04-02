@@ -129,6 +129,7 @@ export default function JobsDashboardPage() {
           value={uploadJobs.length}
           subtitle={`${uploadsByStatus.running || 0} running, ${uploadsByStatus.completed || 0} completed`}
           color="blue"
+          to="/upload"
         />
         <StatsCard
           icon={<Download className="text-green-500" />}
@@ -136,6 +137,7 @@ export default function JobsDashboardPage() {
           value={exportJobs.length}
           subtitle={`${exportsByStatus.running || 0} running, ${exportsByStatus.completed || 0} completed`}
           color="green"
+          to="/export"
         />
         <StatsCard
           icon={<TrendingUp className="text-indigo-500" />}
@@ -143,6 +145,7 @@ export default function JobsDashboardPage() {
           value={msaStorageJobs.length}
           subtitle={`${msaByStatus.running || 0} running, ${msaByStatus.completed || 0} completed`}
           color="indigo"
+          to="/msa"
         />
         <StatsCard
           icon={<FileText className="text-purple-500" />}
@@ -150,6 +153,7 @@ export default function JobsDashboardPage() {
           value={formatNumber(stats?.total_audit_logs || recentAudit.length)}
           subtitle="Last 24 hours"
           color="purple"
+          to="/settings/audit"
         />
         <StatsCard
           icon={<Database className="text-orange-500" />}
@@ -157,6 +161,7 @@ export default function JobsDashboardPage() {
           value={stats?.total_tables || '-'}
           subtitle={`${formatNumber(stats?.total_rows || 0)} total rows`}
           color="orange"
+          to="/tables"
         />
       </div>
 
@@ -455,25 +460,28 @@ export default function JobsDashboardPage() {
   )
 }
 
-function StatsCard({ icon, title, value, subtitle, color }) {
+function StatsCard({ icon, title, value, subtitle, color, to }) {
   const colors = {
     blue: 'from-blue-50 to-blue-100 border-blue-200',
     green: 'from-green-50 to-green-100 border-green-200',
+    indigo: 'from-indigo-50 to-indigo-100 border-indigo-200',
     purple: 'from-purple-50 to-purple-100 border-purple-200',
     orange: 'from-orange-50 to-orange-100 border-orange-200',
   }
+  const Wrapper = to ? Link : 'div'
+  const wrapperProps = to ? { to } : {}
   return (
-    <div className={`p-4 rounded-xl bg-gradient-to-br ${colors[color]} border`}>
+    <Wrapper {...wrapperProps} className={`block p-3 rounded-xl bg-gradient-to-br ${colors[color]} border hover:shadow-md transition-shadow cursor-pointer group`}>
       <div className="flex items-start justify-between">
         <div>
-          <p className="text-xs text-gray-500 font-medium">{title}</p>
-          <p className="text-2xl font-bold text-gray-900 mt-1">{value}</p>
-          <p className="text-xs text-gray-500 mt-1">{subtitle}</p>
+          <p className="text-[10px] text-gray-500 font-semibold">{title}</p>
+          <p className="text-xl font-bold text-gray-900 mt-0.5">{value}</p>
+          <p className="text-[10px] text-gray-500 mt-0.5">{subtitle}</p>
         </div>
-        <div className="p-2 bg-white rounded-lg shadow-sm">
+        <div className="p-1.5 bg-white rounded-lg shadow-sm group-hover:shadow-md transition-shadow">
           {icon}
         </div>
       </div>
-    </div>
+    </Wrapper>
   )
 }

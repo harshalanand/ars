@@ -3,10 +3,11 @@
  * Light theme matching ARS app (bg-gray-50 layout).
  */
 import { useState, useEffect, useCallback } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { gridBuilderAPI } from '@/services/api'
 import toast from 'react-hot-toast'
 import {
-  Plus, Play, PlayCircle, Trash2, Edit3, X, Save,
+  Plus, Play, PlayCircle, Trash2, Edit3, X, Save, Eye,
   CheckCircle2, XCircle, Clock, AlertTriangle, Loader,
   LayoutGrid, ChevronDown, ChevronUp, RefreshCw, Database
 } from 'lucide-react'
@@ -310,6 +311,7 @@ const RunResultsModal = ({ results, onClose }) => {
 
 /* ── Main Page ────────────────────────────────────────────────────────────── */
 export default function GridBuilderPage() {
+  const navigate = useNavigate()
   const [grids,       setGrids]      = useState([])
   const [availCols,   setAvailCols]  = useState(['MATNR','WERKS'])
   const [loading,     setLoading]    = useState(false)
@@ -489,14 +491,14 @@ export default function GridBuilderPage() {
           </div>
         ) : (
           <div style={{ overflowX:'auto' }}>
-            <table style={{ width:'100%', borderCollapse:'collapse', fontSize:13, minWidth:800 }}>
+            <table style={{ width:'100%', borderCollapse:'collapse', fontSize:10, minWidth:700 }}>
               <thead>
                 <tr style={{ background:'#f1f5f9', borderBottom:`2px solid ${C.cardBorder}` }}>
-                  {['#','Grid Name','Output Table','Hierarchy Cols','KPI Filter',
-                    'Last Run','Rows','Status','Actions'].map(h => (
-                    <th key={h} style={{ padding:'9px 14px', textAlign:'left',
-                      fontSize:11, fontWeight:700, color:C.textSub,
-                      textTransform:'uppercase', letterSpacing:'.06em',
+                  {['#','Grid Name','Output Table','Hierarchy','KPI',
+                    'Last Run','Status','Rows','Actions'].map(h => (
+                    <th key={h} style={{ padding:'5px 8px', textAlign:'left',
+                      fontSize:9, fontWeight:700, color:C.textSub,
+                      textTransform:'uppercase', letterSpacing:'.04em',
                       whiteSpace:'nowrap' }}>
                       {h}
                     </th>
@@ -510,161 +512,136 @@ export default function GridBuilderPage() {
                     <tr key={g.id} style={{
                       borderBottom:`1px solid ${C.cardBorder}`,
                       background: idx%2===0 ? C.card : C.rowAlt,
-                      transition:'background .1s',
                     }}>
                       {/* Sequence */}
-                      <td style={{ padding:'6px 8px', textAlign:'center', width:60 }}>
-                        <div style={{ display:'flex', alignItems:'center', gap:2, justifyContent:'center' }}>
-                          <div style={{ display:'flex', flexDirection:'column', gap:0 }}>
+                      <td style={{ padding:'4px 4px', textAlign:'center', width:40 }}>
+                        <div style={{ display:'flex', alignItems:'center', gap:1, justifyContent:'center' }}>
+                          <div style={{ display:'flex', flexDirection:'column' }}>
                             <button onClick={() => moveGrid(idx, -1)} disabled={idx === 0}
-                              style={{ background:'none', border:'none', cursor: idx === 0 ? 'default' : 'pointer', padding:0, opacity: idx === 0 ? .2 : .6 }}>
-                              <ChevronUp size={12} />
+                              style={{ background:'none', border:'none', cursor: idx === 0 ? 'default' : 'pointer', padding:0, opacity: idx === 0 ? .2 : .6, lineHeight:0 }}>
+                              <ChevronUp size={10} />
                             </button>
                             <button onClick={() => moveGrid(idx, 1)} disabled={idx === grids.length - 1}
-                              style={{ background:'none', border:'none', cursor: idx === grids.length - 1 ? 'default' : 'pointer', padding:0, opacity: idx === grids.length - 1 ? .2 : .6 }}>
-                              <ChevronDown size={12} />
+                              style={{ background:'none', border:'none', cursor: idx === grids.length - 1 ? 'default' : 'pointer', padding:0, opacity: idx === grids.length - 1 ? .2 : .6, lineHeight:0 }}>
+                              <ChevronDown size={10} />
                             </button>
                           </div>
-                          <span style={{ fontSize:12, fontWeight:700, color:C.textMuted }}>{idx + 1}</span>
+                          <span style={{ fontSize:10, fontWeight:700, color:C.textMuted }}>{idx + 1}</span>
                         </div>
                       </td>
                       {/* Grid name */}
-                      <td style={{ padding:'10px 14px' }}>
-                        <div style={{ fontWeight:700, color:C.text }}>{g.grid_name}</div>
-                        {g.description && (
-                          <div style={{ fontSize:11, color:C.textMuted, marginTop:1 }}>{g.description}</div>
-                        )}
+                      <td style={{ padding:'4px 8px' }}>
+                        <div style={{ fontWeight:700, fontSize:11, color:C.text }}>{g.grid_name}</div>
                       </td>
 
                       {/* Output table */}
-                      <td style={{ padding:'10px 14px' }}>
-                        <code style={{ fontSize:11, color:C.primary, background:C.primaryLt,
-                          padding:'2px 6px', borderRadius:4, border:`1px solid ${C.primaryBd}`,
+                      <td style={{ padding:'4px 8px' }}>
+                        <code style={{ fontSize:9, color:C.primary, background:C.primaryLt,
+                          padding:'1px 5px', borderRadius:3, border:`1px solid ${C.primaryBd}`,
                           fontFamily:'monospace', fontWeight:600 }}>
                           {g.output_table}
                         </code>
                       </td>
 
                       {/* Hierarchy cols */}
-                      <td style={{ padding:'10px 14px' }}>
-                        <div style={{ display:'flex', flexWrap:'wrap', gap:3 }}>
+                      <td style={{ padding:'4px 8px' }}>
+                        <div style={{ display:'flex', flexWrap:'wrap', gap:2 }}>
                           {(g.hierarchy_columns.length ? g.hierarchy_columns : ['MATNR','WERKS']).map(c => (
-                            <span key={c} style={{ fontSize:10, fontWeight:600, color:C.textSub,
+                            <span key={c} style={{ fontSize:8, fontWeight:600, color:C.textSub,
                               background:C.grayBg, border:`1px solid ${C.grayBd}`,
-                              padding:'1px 6px', borderRadius:4, fontFamily:'monospace' }}>{c}</span>
+                              padding:'0px 4px', borderRadius:3, fontFamily:'monospace' }}>{c}</span>
                           ))}
                         </div>
                       </td>
 
                       {/* KPI filter */}
-                      <td style={{ padding:'10px 14px' }}>
+                      <td style={{ padding:'4px 8px' }}>
                         {g.kpi_filter
-                          ? <span style={{ fontSize:11, fontWeight:700, color:C.amber,
+                          ? <span style={{ fontSize:9, fontWeight:700, color:C.amber,
                               background:C.amberBg, border:`1px solid ${C.amberBd}`,
-                              padding:'2px 8px', borderRadius:4 }}>{g.kpi_filter}</span>
-                          : <span style={{ fontSize:11, color:C.textMuted }}>All SLOCs</span>}
+                              padding:'1px 5px', borderRadius:3 }}>{g.kpi_filter}</span>
+                          : <span style={{ fontSize:9, color:C.textMuted }}>All</span>}
                       </td>
 
                       {/* Last run */}
-                      <td style={{ padding:'10px 14px' }}>
+                      <td style={{ padding:'4px 8px', whiteSpace:'nowrap' }}>
                         {g.last_run_at ? (
-                          <div>
-                            <div style={{ fontSize:11, color:C.text }}>
-                              {new Date(g.last_run_at).toLocaleString()}
-                            </div>
-                            {g.last_run_status && <StatusBadge s={g.last_run_status}/>}
-                            {g.last_run_error && (
-                              <div style={{ fontSize:10, color:C.red, marginTop:2,
-                                maxWidth:180, overflow:'hidden', textOverflow:'ellipsis',
-                                whiteSpace:'nowrap' }} title={g.last_run_error}>
-                                {g.last_run_error}
-                              </div>
-                            )}
+                          <div style={{ fontSize:9, color:C.textSub }}>
+                            {new Date(g.last_run_at).toLocaleDateString()},{' '}
+                            {new Date(g.last_run_at).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}
                           </div>
                         ) : (
-                          <span style={{ fontSize:11, color:C.textMuted }}>Never run</span>
+                          <span style={{ fontSize:9, color:C.textMuted }}>—</span>
+                        )}
+                        {g.last_run_error && (
+                          <div style={{ fontSize:8, color:C.red, maxWidth:120, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }} title={g.last_run_error}>
+                            {g.last_run_error}
+                          </div>
                         )}
                       </td>
 
+                      {/* Status */}
+                      <td style={{ padding:'4px 8px' }}>
+                        <div style={{ display:'flex', alignItems:'center', gap:4 }}>
+                          <button onClick={() => handleToggleStatus(g)} style={{
+                            display:'inline-flex', alignItems:'center', gap:4,
+                            padding:'2px 8px', borderRadius:10, fontSize:9, fontWeight:700,
+                            cursor:'pointer', border:'none',
+                            background: g.status==='Active' ? C.greenBg : C.redBg,
+                            color:      g.status==='Active' ? C.green   : C.red }}>
+                            <span style={{ width:20, height:10, borderRadius:5, position:'relative',
+                              display:'inline-block', flexShrink:0,
+                              background: g.status==='Active' ? '#10b981' : '#e2e8f0' }}>
+                              <span style={{ position:'absolute', top:1, width:8, height:8,
+                                borderRadius:'50%', background:'#fff',
+                                boxShadow:'0 1px 2px rgba(0,0,0,.3)',
+                                left: g.status==='Active' ? 10 : 2 }}/>
+                            </span>
+                            {g.status}
+                          </button>
+                          {g.last_run_status && <StatusBadge s={g.last_run_status}/>}
+                        </div>
+                      </td>
+
                       {/* Row count */}
-                      <td style={{ padding:'10px 14px' }}>
+                      <td style={{ padding:'4px 8px', textAlign:'right' }}>
                         {g.last_run_rows != null
-                          ? <strong style={{ color:C.text }}>{g.last_run_rows.toLocaleString()}</strong>
+                          ? <strong style={{ fontSize:10, color:C.text }}>{g.last_run_rows.toLocaleString()}</strong>
                           : <span style={{ color:C.textMuted }}>—</span>}
                       </td>
 
-                      {/* Status toggle */}
-                      <td style={{ padding:'10px 14px' }}>
-                        <button onClick={() => handleToggleStatus(g)} style={{
-                          display:'inline-flex', alignItems:'center', gap:6,
-                          padding:'4px 12px', borderRadius:7, fontSize:11, fontWeight:700,
-                          cursor:'pointer', transition:'all .15s',
-                          border:`1px solid ${g.status==='Active' ? C.greenBd : C.redBd}`,
-                          background: g.status==='Active' ? C.greenBg : C.redBg,
-                          color:      g.status==='Active' ? C.green   : C.red }}>
-                          {/* pill */}
-                          <span style={{ width:26, height:14, borderRadius:7, position:'relative',
-                            display:'inline-block', flexShrink:0,
-                            background: g.status==='Active' ? '#10b981' : '#e2e8f0', transition:'background .2s' }}>
-                            <span style={{ position:'absolute', top:2, width:10, height:10,
-                              borderRadius:'50%', background:'#fff',
-                              boxShadow:'0 1px 3px rgba(0,0,0,.3)', transition:'left .2s',
-                              left: g.status==='Active' ? 14 : 2 }}/>
-                          </span>
-                          {g.status}
-                        </button>
-                      </td>
-
-                      {/* Actions */}
-                      <td style={{ padding:'10px 14px' }}>
-                        <div style={{ display:'flex', gap:6, alignItems:'center' }}>
-                          {/* Run */}
-                          <button onClick={() => handleRun(g)}
-                            disabled={isRunning || runningAll}
-                            title="Run this grid"
-                            style={{ display:'flex', alignItems:'center', gap:4,
-                              padding:'5px 10px', borderRadius:7, fontSize:11, fontWeight:600,
-                              cursor: isRunning ? 'not-allowed' : 'pointer',
-                              border:`1px solid ${C.greenBd}`, background:C.greenBg, color:C.green,
-                              opacity: (isRunning||runningAll) ? .5 : 1 }}>
-                            {isRunning
-                              ? <Loader size={12} style={{ animation:'spin 1s linear infinite' }}/>
-                              : <Play size={12}/>}
-                            Run
+                      {/* Actions — icon buttons only */}
+                      <td style={{ padding:'4px 8px' }}>
+                        <div style={{ display:'flex', gap:3, alignItems:'center' }}>
+                          {g.last_run_rows > 0 && (
+                            <button onClick={() => navigate(`/tables/${encodeURIComponent(g.output_table)}?from=grid-builder`)}
+                              title="View data" style={{ padding:3, borderRadius:4, border:'none', cursor:'pointer', background:C.blueBg, color:C.blue, display:'flex' }}>
+                              <Eye size={11}/>
+                            </button>
+                          )}
+                          <button onClick={() => handleRun(g)} disabled={isRunning || runningAll}
+                            title="Run" style={{ padding:3, borderRadius:4, border:'none', cursor: isRunning?'not-allowed':'pointer', background:C.greenBg, color:C.green, display:'flex', opacity:(isRunning||runningAll)?.5:1 }}>
+                            {isRunning ? <Loader size={11} style={{ animation:'spin 1s linear infinite' }}/> : <Play size={11}/>}
                           </button>
-                          {/* Edit */}
                           <button onClick={() => { setEditing(g); setModalOpen(true) }}
-                            title="Edit grid"
-                            style={{ display:'flex', alignItems:'center', gap:4,
-                              padding:'5px 10px', borderRadius:7, fontSize:11, fontWeight:600,
-                              cursor:'pointer', border:`1px solid ${C.primaryBd}`,
-                              background:C.primaryLt, color:C.primary }}>
-                            <Edit3 size={12}/> Edit
+                            title="Edit" style={{ padding:3, borderRadius:4, border:'none', cursor:'pointer', background:C.primaryLt, color:C.primary, display:'flex' }}>
+                            <Edit3 size={11}/>
                           </button>
-                          {/* Delete */}
                           {deleteConf === g.id ? (
-                            <div style={{ display:'flex', gap:4 }}>
+                            <div style={{ display:'flex', gap:2 }}>
                               <button onClick={() => handleDelete(g.id)}
-                                style={{ padding:'5px 10px', borderRadius:7, fontSize:11, fontWeight:700,
-                                  cursor:'pointer', border:`1px solid ${C.redBd}`,
-                                  background:C.red, color:'#fff' }}>
-                                Confirm
+                                style={{ padding:'2px 6px', borderRadius:4, fontSize:9, fontWeight:700, cursor:'pointer', border:'none', background:C.red, color:'#fff' }}>
+                                Yes
                               </button>
                               <button onClick={() => setDeleteConf(null)}
-                                style={{ padding:'5px 8px', borderRadius:7, fontSize:11,
-                                  cursor:'pointer', border:`1px solid ${C.grayBd}`,
-                                  background:C.grayBg, color:C.textSub }}>
-                                <X size={11}/>
+                                style={{ padding:'2px 4px', borderRadius:4, fontSize:9, cursor:'pointer', border:'none', background:C.grayBg, color:C.textSub }}>
+                                <X size={9}/>
                               </button>
                             </div>
                           ) : (
                             <button onClick={() => setDeleteConf(g.id)}
-                              title="Delete grid"
-                              style={{ display:'flex', alignItems:'center',
-                                padding:'5px 8px', borderRadius:7, fontSize:11,
-                                cursor:'pointer', border:`1px solid ${C.redBd}`,
-                                background:C.redBg, color:C.red }}>
-                              <Trash2 size={12}/>
+                              title="Delete" style={{ padding:3, borderRadius:4, border:'none', cursor:'pointer', background:C.redBg, color:C.red, display:'flex' }}>
+                              <Trash2 size={11}/>
                             </button>
                           )}
                         </div>
