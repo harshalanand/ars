@@ -28,7 +28,7 @@ const dataManagementItems = [
 const dataPreparationItems = [
   { label: 'MSA Stock Calculation', path: '/msa', icon: BarChart3 },
   { label: 'BDC Creation', path: '/bdc', icon: FileText },
-  { label: 'Store Stock', path: '/data-prep/store-stock', icon: LayoutGrid },
+  { label: 'Grid Builder', path: '/data-prep/store-stock', icon: LayoutGrid },
   { label: 'Lookup Art Master', path: '/data-prep/lookup-art-master', icon: Search },
 ]
 

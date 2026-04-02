@@ -526,7 +526,7 @@ def run_grid(grid_id: int, current_user: User = Depends(get_current_user)):
 
 
 @router.put("/reorder", response_model=APIResponse)
-def reorder_grids(body: Dict[str, Any], current_user: User = Depends(get_current_user)):
+def reorder_grids(body: dict, current_user: User = Depends(get_current_user)):
     """Update sequence order for grids. Body: {sequence: [{id, seq}, ...]}"""
     seq_list = body.get("sequence", [])
     if not seq_list:
