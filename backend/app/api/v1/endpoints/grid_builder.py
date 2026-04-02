@@ -211,8 +211,8 @@ POST_PIVOT_LOOKUPS = [
         "requires":     ["WERKS", "MAJ_CAT"],
     },
     # 3. Dynamic: join contribution data from Master_CONT_{last hierarchy col}
-    #    Grid MJ (WERKS, MAJ_CAT)       → Master_CONT_MAJ_CAT
-    #    Grid MJ_SEG (WERKS, MAJ_CAT, RNG_SEG) → Master_CONT_RNG_SEG
+    #    Grid MJ (WERKS, MAJ_CAT)               → Master_CONT_MAJ_CAT
+    #    Grid MJ_SEG (WERKS, MAJ_CAT, RNG_SEG)  → Master_CONT_RNG_SEG
     {
         "lookup_table": "Master_CONT_{HIER_LAST}",
         "columns":      ["*"],
