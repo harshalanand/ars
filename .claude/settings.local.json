@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(grep -r \"ET_STORE_STOCK\\\\|table.*stock\\\\|sloc.*stock\" /d/ars --include=*.md --include=*.txt --include=*.rst)",
+      "Bash(grep -r VW_ET_MSA_STK_WITH_MASTER /d/ars/backend --include=*.py -B 5 -A 10)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('D:/ars/backend/app/api/v1/endpoints/trends.py'\\).read\\(\\)\\); print\\('OK'\\)\")",
+      "Bash(python -c \"from app.api.v1.endpoints.trends import router; print\\('Import OK, prefix:', router.prefix\\)\")",
+      "Bash(./venv/Scripts/python -c \"from app.api.v1.endpoints.trends import router; print\\('Import OK, prefix:', router.prefix\\)\")",
+      "Bash(node -e ':*)",
+      "Bash(npx vite:*)"
+    ]
+  }
+}
