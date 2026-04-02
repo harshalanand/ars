@@ -39,22 +39,23 @@ SYSTEM_COLUMNS = {
 # ============================================================================
 
 def _safe_name(name: str) -> str:
-    """Sanitize a table or column name: alphanumeric + underscore only.
-    Since we always use [brackets] in SQL, digit-leading names are safe."""
+    """Sanitize a table or column name: uppercase, alphanumeric + underscore only."""
     if not name or not name.strip():
         raise HTTPException(400, detail="Name cannot be empty")
     cleaned = re.sub(r"[^A-Za-z0-9_]", "_", name.strip()).upper()
     cleaned = re.sub(r"_+", "_", cleaned).strip("_")
     if not cleaned:
         raise HTTPException(400, detail=f"Name '{name}' results in empty string after sanitization")
+    if cleaned[0].isdigit():
+        cleaned = "_" + cleaned
     return cleaned
 
 
 def _validate_trend_table(name: str) -> str:
-    """Assert table name starts with Trend_ prefix (case-insensitive). Return the validated name."""
+    """Assert table name starts with Trend_ prefix. Return the validated name."""
     if not name:
         raise HTTPException(400, detail="Table name is required")
-    if not name.upper().startswith(TABLE_PREFIX.upper()):
+    if not name.startswith(TABLE_PREFIX):
         raise HTTPException(400, detail=f"Table name must start with '{TABLE_PREFIX}'")
     # Ensure the rest is safe
     suffix = name[len(TABLE_PREFIX):]
@@ -211,7 +212,7 @@ def list_tables(current_user: User = Depends(get_current_user)):
         with de.connect() as conn:
             rows = conn.execute(text("""
                 SELECT t.TABLE_NAME,
-                       ISNULL(SUM(p.row_count), 0) AS row_count
+                       ISNULL(SUM(p.rows), 0) AS row_count
                 FROM INFORMATION_SCHEMA.TABLES t
                 LEFT JOIN sys.dm_db_partition_stats p
                     ON OBJECT_ID(t.TABLE_NAME) = p.object_id AND p.index_id IN (0, 1)
@@ -587,7 +588,7 @@ def review_data(
     date_from = body.get("date_from")
     date_to = body.get("date_to")
     filters: Dict[str, List] = body.get("filters", {})
-    limit = body.get("limit")  # None or 0 = no limit
+    limit = body.get("limit", 1000)
 
     de = get_data_engine()
     if not _table_exists(de, table_name):
@@ -628,11 +629,8 @@ def review_data(
             total = conn.execute(text(count_sql), params).scalar()
 
             # Get data
-            if limit is not None and int(limit) > 0:
-                data_sql = f"SELECT TOP(:lim) * FROM [{table_name}] {where_sql}"
-                params["lim"] = int(limit)
-            else:
-                data_sql = f"SELECT * FROM [{table_name}] {where_sql}"
+            data_sql = f"SELECT TOP(:lim) * FROM [{table_name}] {where_sql}"
+            params["lim"] = int(limit)
             rows = conn.execute(text(data_sql), params)
             columns = list(rows.keys())
             result_rows = rows.fetchall()
@@ -644,8 +642,6 @@ def review_data(
                 val = row[i]
                 if hasattr(val, "isoformat"):
                     val = val.isoformat()
-                elif isinstance(val, float):
-                    val = round(val, 2)
                 record[col] = val
             data.append(record)
 
