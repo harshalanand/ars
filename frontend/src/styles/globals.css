@@ -85,24 +85,28 @@
   --ag-header-background-color: #f8fafc;
   --ag-header-foreground-color: #374151;
   --ag-row-hover-color: #f0f7ff;
-  --ag-selected-row-background-color: #dbeafe;
-  --ag-font-size: 11px;
+  --ag-selected-row-background-color: #bfdbfe;
+  --ag-font-size: 9px;
   --ag-font-family: 'Inter', system-ui, sans-serif;
   --ag-border-color: #e5e7eb;
   --ag-row-border-color: #f3f4f6;
-  --ag-header-height: 30px;
-  --ag-row-height: 26px;
-  --ag-cell-horizontal-padding: 6px;
+  --ag-header-height: 26px;
+  --ag-row-height: 22px;
+  --ag-cell-horizontal-padding: 5px;
   --ag-header-column-separator-display: block;
   --ag-header-column-separator-color: #e5e7eb;
   --ag-odd-row-background-color: #fafbfc;
 }
 .ag-theme-alpine .ag-header-cell-label { font-weight: 600; font-size: 10px; text-transform: uppercase; letter-spacing: 0.03em; }
 .ag-theme-alpine .ag-header { border-bottom: 2px solid #e5e7eb; }
-.ag-theme-alpine .ag-cell { display: flex; align-items: center; font-size: 11px; }
-.ag-theme-alpine .ag-floating-filter-input { font-size: 10px !important; }
-.ag-theme-alpine .ag-paging-panel { font-size: 10px !important; height: 28px; }
-.ag-theme-alpine .ag-paging-page-size .ag-select { font-size: 10px !important; }
+.ag-theme-alpine .ag-cell { display: flex; align-items: center; font-size: 9px; font-weight: 400; }
+.ag-theme-alpine .ag-row-selected { background-color: #bfdbfe !important; }
+.ag-theme-alpine .ag-row-selected:hover { background-color: #93c5fd !important; }
+.ag-theme-alpine .ag-row-selected .ag-cell { color: #1e3a5f; font-weight: 500; }
+.ag-theme-alpine .ag-cell-pk { font-weight: 600; background: #f8fafc; }
+.ag-theme-alpine .ag-floating-filter-input { font-size: 9px !important; }
+.ag-theme-alpine .ag-paging-panel { font-size: 9px !important; height: 24px; }
+.ag-theme-alpine .ag-paging-page-size .ag-select { font-size: 9px !important; }
 
 /* Compact grid variant */
 .ag-compact .ag-header-cell-label { font-size: 9px !important; }

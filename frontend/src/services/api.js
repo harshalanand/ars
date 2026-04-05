@@ -284,9 +284,10 @@ export const gridBuilderAPI = {
   createGrid:  (data)       => api.post('/grid-builder/grids', data),
   updateGrid:  (id, data)   => api.put(`/grid-builder/grids/${id}`, data),
   deleteGrid:  (id)         => api.delete(`/grid-builder/grids/${id}`),
-  runGrid:     (id)         => api.post(`/grid-builder/grids/${id}/run`),
-  runAll:      ()           => api.post('/grid-builder/run-all'),
+  runGrid:     (id)         => api.post(`/grid-builder/grids/${id}/run`, null, { timeout: 600000 }),
+  runAll:      ()           => api.post('/grid-builder/run-all', null, { timeout: 1800000 }),
   reorder:     (sequence)   => api.put('/grid-builder/reorder', { sequence }),
+  calcPreview: ()           => api.get('/grid-builder/calculation-preview'),
 }
 
 // ============== Lookup Art Master (Data Preparation) ==============

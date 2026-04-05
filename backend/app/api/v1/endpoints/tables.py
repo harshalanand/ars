@@ -904,7 +904,7 @@ async def reorder_columns(
 async def query_table_data(
     table_name: str,
     page: int = Query(1, ge=1),
-    page_size: int = Query(50, ge=1, le=5000),
+    page_size: int = Query(50, ge=1, le=10000),
     order_by: str = Query(None),
     order_dir: str = Query("ASC"),
     filters: str = Query(None, description="JSON encoded filter object"),

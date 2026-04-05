@@ -40,7 +40,8 @@ const StatusBadge = ({ s }) => {
     Inactive: [C.red,    C.redBg,    C.redBd],
     Success:  [C.green,  C.greenBg,  C.greenBd],
     Failed:   [C.red,    C.redBg,    C.redBd],
-    Running:  [C.blue,   C.blueBg,   C.blueBd],
+    Running:     [C.blue,   C.blueBg,   C.blueBd],
+    Interrupted: ['#f59e0b','#fef3c7','#fde68a'],
   }
   const [col, bg, bd] = map[s] || [C.gray, C.grayBg, C.grayBd]
   return (
@@ -323,6 +324,7 @@ export default function GridBuilderPage() {
   const [savingSeq,   setSavingSeq]  = useState(false)
   const [runResults,  setRunResults] = useState(null)
   const [deleteConf,  setDeleteConf] = useState(null)   // id to confirm delete
+  const [calcLog,     setCalcLog]    = useState(null)   // calculation steps modal
 
   /* load */
   const load = useCallback(async () => {
@@ -364,12 +366,17 @@ export default function GridBuilderPage() {
   /* create / update */
   const handleSave = async (form) => {
     try {
+      let res
       if (editing) {
-        await gridBuilderAPI.updateGrid(editing.id, form)
+        res = await gridBuilderAPI.updateGrid(editing.id, form)
         toast.success(`Grid '${form.grid_name || editing.grid_name}' updated.`)
       } else {
-        await gridBuilderAPI.createGrid(form)
+        res = await gridBuilderAPI.createGrid(form)
         toast.success(`Grid '${form.grid_name}' created.`)
+      }
+      const warns = res?.data?.data?.warnings || []
+      if (warns.length) {
+        toast(warns.join('\n'), { icon: '⚠️', duration: 6000, style: { fontSize: 11, maxWidth: 400 } })
       }
       setModalOpen(false); setEditing(null)
       await load()
@@ -396,25 +403,44 @@ export default function GridBuilderPage() {
     } catch {}
   }
 
+  /* poll grid list while running */
+  const pollGrids = (interval = 2000) => {
+    const tid = setInterval(async () => {
+      try {
+        const res = await gridBuilderAPI.listGrids()
+        setGrids(res.data.data.grids || [])
+      } catch {}
+    }, interval)
+    return () => clearInterval(tid)
+  }
+
   /* run single */
   const handleRun = async (grid) => {
     setRunningId(grid.id)
+    setGrids(prev => prev.map(g => g.id === grid.id ? { ...g, last_run_status: 'Running' } : g))
+    const stopPoll = pollGrids()
     try {
       const { data } = await gridBuilderAPI.runGrid(grid.id)
+      const warns = data.data?.warnings || []
+      if (warns.length) {
+        toast(warns.join('\n'), { icon: '⚠️', duration: 6000, style: { fontSize: 11, maxWidth: 400 } })
+      }
       toast.success(data.message)
       await load()
-    } catch {} finally { setRunningId(null) }
+    } catch {} finally { stopPoll(); setRunningId(null) }
   }
 
   /* run all */
   const handleRunAll = async () => {
     setRunningAll(true)
+    setGrids(prev => prev.map(g => g.status === 'Active' ? { ...g, last_run_status: 'Running' } : g))
+    const stopPoll = pollGrids()
     try {
       const { data } = await gridBuilderAPI.runAll()
       toast.success(data.message)
       setRunResults(data.data.results || [])
       await load()
-    } catch {} finally { setRunningAll(false) }
+    } catch {} finally { stopPoll(); setRunningAll(false) }
   }
 
   const activeCount = grids.filter(g => g.status === 'Active').length
@@ -471,6 +497,14 @@ export default function GridBuilderPage() {
                 ? <><Loader size={13} style={{ animation:'spin 1s linear infinite' }}/> Running…</>
                 : <><PlayCircle size={13}/> Run All Active ({activeCount})</>}
             </Btn>
+            <Btn onClick={async () => {
+              try {
+                const { data } = await gridBuilderAPI.calcPreview()
+                setCalcLog({ steps: data.data?.steps || [], duration: data.data?.duration || 0 })
+              } catch { toast.error('Failed to load calc log') }
+            }} color="blue">
+              <Database size={13}/> Calc Log
+            </Btn>
             <Btn onClick={load} disabled={loading} color="gray">
               <RefreshCw size={13} style={{ animation:loading?'spin 1s linear infinite':'none' }}/>
             </Btn>
@@ -495,7 +529,7 @@ export default function GridBuilderPage() {
               <thead>
                 <tr style={{ background:'#f1f5f9', borderBottom:`2px solid ${C.cardBorder}` }}>
                   {['#','Grid Name','Output Table','Hierarchy','KPI',
-                    'Last Run','Status','Rows','Actions'].map(h => (
+                    'Last Run','Status','Rows','Time','Alerts','Actions'].map(h => (
                     <th key={h} style={{ padding:'5px 8px', textAlign:'left',
                       fontSize:9, fontWeight:700, color:C.textSub,
                       textTransform:'uppercase', letterSpacing:'.04em',
@@ -573,11 +607,6 @@ export default function GridBuilderPage() {
                         ) : (
                           <span style={{ fontSize:9, color:C.textMuted }}>—</span>
                         )}
-                        {g.last_run_error && (
-                          <div style={{ fontSize:8, color:C.red, maxWidth:120, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }} title={g.last_run_error}>
-                            {g.last_run_error}
-                          </div>
-                        )}
                       </td>
 
                       {/* Status */}
@@ -608,6 +637,24 @@ export default function GridBuilderPage() {
                         {g.last_run_rows != null
                           ? <strong style={{ fontSize:10, color:C.text }}>{g.last_run_rows.toLocaleString()}</strong>
                           : <span style={{ color:C.textMuted }}>—</span>}
+                      </td>
+
+                      {/* Duration */}
+                      <td style={{ padding:'4px 8px', textAlign:'center' }}>
+                        {g.duration_sec != null ? (
+                          <span style={{ fontSize:9, color:'#059669', fontWeight:600 }}>{g.duration_sec}s</span>
+                        ) : <span style={{ fontSize:9, color:C.textMuted }}>—</span>}
+                      </td>
+
+                      {/* Alerts/Warnings */}
+                      <td style={{ padding:'4px 8px', textAlign:'center' }}>
+                        {g.last_run_error && g.last_run_error.startsWith('⚠') ? (
+                          <span title={g.last_run_error} style={{ cursor:'pointer', fontSize:14 }}>⚠️</span>
+                        ) : g.last_run_error ? (
+                          <span title={g.last_run_error} style={{ cursor:'pointer', fontSize:14 }}>❌</span>
+                        ) : g.last_run_status === 'Success' ? (
+                          <span title="No issues" style={{ fontSize:14 }}>✅</span>
+                        ) : null}
                       </td>
 
                       {/* Actions — icon buttons only */}
@@ -670,6 +717,55 @@ export default function GridBuilderPage() {
       <GridModal open={modalOpen} onClose={() => { setModalOpen(false); setEditing(null) }}
         onSave={handleSave} availableCols={availCols} editing={editing}/>
       <RunResultsModal results={runResults} onClose={() => setRunResults(null)}/>
+
+      {/* Calculation Log Modal */}
+      {calcLog && (
+        <div style={{ position:'fixed', inset:0, background:'rgba(0,0,0,.5)', display:'flex',
+          alignItems:'center', justifyContent:'center', zIndex:1000 }}
+          onClick={() => setCalcLog(null)}>
+          <div onClick={e => e.stopPropagation()} style={{
+            background:'#fff', borderRadius:8, width:600, maxHeight:'80vh', overflow:'hidden',
+            boxShadow:'0 20px 60px rgba(0,0,0,.2)', display:'flex', flexDirection:'column' }}>
+            <div style={{ padding:'10px 14px', background:'#f8fafc', borderBottom:'1px solid #e2e8f0',
+              display:'flex', justifyContent:'space-between', alignItems:'center' }}>
+              <span style={{ fontSize:12, fontWeight:700 }}>
+                Pre-Grid Calculation
+                {calcLog?.duration > 0 && <span style={{ fontSize:9, fontWeight:400, color:'#059669', marginLeft:8 }}>⏱ {calcLog.duration}s</span>}
+              </span>
+              <button onClick={() => setCalcLog(null)} style={{ background:'none', border:'none', cursor:'pointer' }}>
+                <X size={14}/>
+              </button>
+            </div>
+            <div style={{ overflow:'auto', flex:1, padding:10 }}>
+              <table style={{ width:'100%', borderCollapse:'collapse', fontSize:10 }}>
+                <thead>
+                  <tr style={{ background:'#f1f5f9', borderBottom:'2px solid #e2e8f0' }}>
+                    <th style={{ padding:'5px 8px', textAlign:'left', fontSize:9, fontWeight:700 }}>#</th>
+                    <th style={{ padding:'5px 8px', textAlign:'left', fontSize:9, fontWeight:700 }}>Step</th>
+                    <th style={{ padding:'5px 8px', textAlign:'left', fontSize:9, fontWeight:700 }}>Detail</th>
+                    <th style={{ padding:'5px 8px', textAlign:'center', fontSize:9, fontWeight:700 }}>Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(calcLog?.steps || []).map((s, i) => (
+                    <tr key={i} style={{ borderBottom:'1px solid #f1f5f9' }}>
+                      <td style={{ padding:'4px 8px', color:'#94a3b8' }}>{i + 1}</td>
+                      <td style={{ padding:'4px 8px', fontWeight:600 }}>{s.step}</td>
+                      <td style={{ padding:'4px 8px', color:'#475569', maxWidth:300, wordBreak:'break-word' }}>{s.detail}</td>
+                      <td style={{ padding:'4px 8px', textAlign:'center' }}>
+                        {s.status === 'ok' ? '✅' : s.status === 'skip' ? '⏭️' : '❌'}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {(calcLog?.steps || []).length === 0 && (
+                <div style={{ padding:20, textAlign:'center', color:'#94a3b8', fontSize:11 }}>No calculation steps recorded</div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       <style>{`@keyframes spin{to{transform:rotate(360deg);}}`}</style>
     </div>

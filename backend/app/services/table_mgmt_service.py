@@ -703,7 +703,17 @@ class TableManagementService:
         with self.data_engine.connect() as conn:
             result = conn.execute(data_sql, params)
             col_names = list(result.keys())
-            rows = [dict(zip(col_names, row)) for row in result]
+            rows = []
+            for row in result:
+                record = {}
+                for i, col in enumerate(col_names):
+                    val = row[i]
+                    if isinstance(val, float):
+                        val = round(val, 4)
+                    elif hasattr(val, 'isoformat'):
+                        val = val.isoformat()
+                    record[col] = val
+                rows.append(record)
 
         return {
             "table_name": table_name,

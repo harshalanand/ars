@@ -246,7 +246,7 @@ export default function TrendReviewPage() {
     if (p.value == null || p.value === '') return ''
     const n = Number(p.value)
     if (isNaN(n)) return p.value
-    return Number.isInteger(n) ? n.toLocaleString() : n.toFixed(2)
+    return Number.isInteger(n) ? n.toLocaleString() : n.toFixed(4)
   }
 
   const colDefs = useMemo(() => visCols.map(col => ({
@@ -391,7 +391,7 @@ export default function TrendReviewPage() {
               pagination
               paginationPageSize={1000}
               paginationPageSizeSelector={[500, 1000, 2000, 5000, 8000]}
-              suppressRowClickSelection
+              rowSelection={{ mode: 'multiRow', enableClickSelection: false }}
               enableCellTextSelection
               ensureDomOrder
             />

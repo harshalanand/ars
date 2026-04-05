@@ -271,6 +271,8 @@ export default function DataEditorPage() {
   // State management
   const [dataLoaded, setDataLoaded] = useState(false)
   const [totalRowCount, setTotalRowCount] = useState(0)  // Total rows BEFORE any filter
+  const [showAddRow, setShowAddRow] = useState(false)
+  const [newRowData, setNewRowData] = useState({})
   const [filteredRowCount, setFilteredRowCount] = useState(null)  // Rows after filters (null = not calculated)
   
   const { hasPermission } = useAuthStore()
@@ -481,7 +483,7 @@ export default function DataEditorPage() {
         resizable: true,
         filter: 'agTextColumnFilter',
         floatingFilter: true,
-        editable: canEdit,
+        editable: (params) => params.data?.__isNew ? true : canEdit,
         cellStyle: (params) => {
           if (isPK) {
             return { fontWeight: 600, background: '#fef3c7', color: '#92400e' }
@@ -515,6 +517,12 @@ export default function DataEditorPage() {
   }), [])
 
   const onCellValueChanged = useCallback((params) => {
+    // For new rows, try auto-save when all PKs are filled
+    if (params.data?.__isNew) {
+      handleSaveNewRow(params)
+      return
+    }
+
     if (pkColumns.length === 0) {
       toast.error('No primary key defined')
       return
@@ -629,6 +637,40 @@ export default function DataEditorPage() {
     gridRef.current?.api?.exportDataAsCsv({ fileName: `${selectedTable}.csv` })
   }
 
+  const handleAddRow = () => {
+    // Add an empty row at the top of the grid for inline editing
+    const emptyRow = {}
+    schema?.columns?.forEach(c => { emptyRow[c.column_name] = '' })
+    emptyRow.__isNew = true
+    setRowData(prev => [emptyRow, ...prev])
+    toast.success('New row added — fill values and double-click cells to edit')
+    // Focus first cell after render
+    setTimeout(() => {
+      gridRef.current?.api?.setFocusedCell(0, schema?.columns?.[0]?.column_name)
+      gridRef.current?.api?.startEditingCell({ rowIndex: 0, colKey: schema?.columns?.[0]?.column_name })
+    }, 100)
+  }
+
+  const handleSaveNewRow = async (params) => {
+    if (!params.data?.__isNew) return
+    const pkCols = schema?.columns?.filter(c => c.is_primary_key).map(c => c.column_name) || []
+    if (pkCols.length === 0) return
+    const missingPk = pkCols.filter(pk => !params.data[pk] || !String(params.data[pk]).trim())
+    if (missingPk.length > 0) return // Not ready yet, still editing
+    try {
+      const record = { ...params.data }
+      delete record.__isNew
+      await dataAPI.upsert({
+        table_name: selectedTable,
+        primary_key_columns: pkCols,
+        records: [record],
+      })
+      toast.success('Row saved')
+      params.data.__isNew = false
+      handleLoadData()
+    } catch (e) { toast.error(e.response?.data?.detail || 'Failed to save row') }
+  }
+
   const totalPages = Math.ceil(total / pageSize)
   const activeFilterCount = Object.values(preFilters).filter(arr => arr && arr.length > 0).length
 
@@ -723,6 +765,9 @@ export default function DataEditorPage() {
             <div className="flex items-center gap-2 pt-5">
               <button onClick={handleLoadData} disabled={loading} className="btn-ghost btn-sm">
                 <RefreshCw size={14} className={loading ? 'animate-spin' : ''} /> Refresh
+              </button>
+              <button onClick={handleAddRow} className="btn-primary btn-sm" disabled={!schema}>
+                <Plus size={14} /> Add Row
               </button>
               <button onClick={exportCSV} className="btn-secondary btn-sm" disabled={rowData.length === 0}>
                 <Download size={14} /> Export
@@ -892,10 +937,9 @@ export default function DataEditorPage() {
                 defaultColDef={defaultColDef}
                 onCellValueChanged={onCellValueChanged}
                 getRowStyle={(params) => {
+                  if (params.data?.__isNew) return { background: '#eef2ff', borderLeft: '3px solid #4f46e5' }
                   const rowKey = getRowKey(params.data)
-                  if (rowKey && pendingChangesRef.current.has(rowKey)) {
-                    return { background: '#f0fdf4' }
-                  }
+                  if (rowKey && pendingChangesRef.current.has(rowKey)) return { background: '#f0fdf4' }
                   return undefined
                 }}
                 animateRows
@@ -962,6 +1006,7 @@ export default function DataEditorPage() {
           onClose={() => setShowAddColumnModal(false)}
         />
       )}
+
     </div>
   )
 }
