@@ -225,13 +225,3 @@ def set_data_connection_options(dbapi_connection, connection_record):
         pass
 
 
-@event.listens_for(system_engine, "checkout")
-def system_checkout_listener(dbapi_connection, connection_record, connection_proxy):
-    """Log when system connection is checked out."""
-    logger.debug("System DB connection checked out from pool")
-
-
-@event.listens_for(data_engine, "checkout")
-def data_checkout_listener(dbapi_connection, connection_record, connection_proxy):
-    """Log when data connection is checked out."""
-    logger.debug("Data DB connection checked out from pool")

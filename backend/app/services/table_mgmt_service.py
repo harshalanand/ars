@@ -560,7 +560,7 @@ class TableManagementService:
     def list_all_database_tables(self) -> List[Dict]:
         """List all tables from SQL Server INFORMATION_SCHEMA (not just registered)."""
         sql = text("""
-            SELECT t.TABLE_NAME, p.rows as row_count
+            SELECT t.TABLE_NAME, p.[rows] as row_count
             FROM INFORMATION_SCHEMA.TABLES t
             LEFT JOIN sys.partitions p
                 ON OBJECT_ID(t.TABLE_NAME) = p.object_id AND p.index_id IN (0, 1)

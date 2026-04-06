@@ -52,10 +52,10 @@ def _safe_name(name: str) -> str:
 
 
 def _validate_trend_table(name: str) -> str:
-    """Assert table name starts with Trend_ prefix. Return the validated name."""
+    """Assert table name starts with Trend_ prefix (case-insensitive). Return the validated name."""
     if not name:
         raise HTTPException(400, detail="Table name is required")
-    if not name.startswith(TABLE_PREFIX):
+    if not name.upper().startswith(TABLE_PREFIX.upper()):
         raise HTTPException(400, detail=f"Table name must start with '{TABLE_PREFIX}'")
     # Ensure the rest is safe
     suffix = name[len(TABLE_PREFIX):]
@@ -212,9 +212,9 @@ def list_tables(current_user: User = Depends(get_current_user)):
         with de.connect() as conn:
             rows = conn.execute(text("""
                 SELECT t.TABLE_NAME,
-                       ISNULL(SUM(p.rows), 0) AS row_count
+                       ISNULL(SUM(p.[rows]), 0) AS row_count
                 FROM INFORMATION_SCHEMA.TABLES t
-                LEFT JOIN sys.dm_db_partition_stats p
+                LEFT JOIN sys.partitions p
                     ON OBJECT_ID(t.TABLE_NAME) = p.object_id AND p.index_id IN (0, 1)
                 WHERE t.TABLE_TYPE = 'BASE TABLE'
                   AND t.TABLE_NAME LIKE :prefix
@@ -428,38 +428,44 @@ async def upload_data(
                     all_cols = [c for c in df.columns]
                     update_cols = [c for c in all_cols if c not in pk_cols]
 
-                    temp_table = f"#temp_{table_name}"
+                    import uuid as _ut
+                    temp_table = f"#temp_{table_name}_{_ut.uuid4().hex[:8]}"
                     df.to_sql(temp_table, de, if_exists="replace", index=False, chunksize=5000)
 
-                    pk_join = " AND ".join(
-                        f"t.[{pk}] = s.[{pk}]" for pk in pk_cols
-                    )
-
-                    # UPDATE existing rows (ROWLOCK = no table lock)
-                    updated = 0
-                    if update_cols:
-                        update_set = ", ".join(f"t.[{c}] = s.[{c}]" for c in update_cols)
-                        conn.execute(text(f"""
-                            UPDATE t WITH (ROWLOCK) SET {update_set}
-                            FROM [{table_name}] t
-                            INNER JOIN [{temp_table}] s ON {pk_join}
-                        """))
-                        updated = conn.connection.cursor().rowcount if hasattr(conn, 'connection') else 0
-
-                    # INSERT new rows (ROWLOCK)
-                    insert_cols = ", ".join(f"[{c}]" for c in all_cols)
-                    insert_vals = ", ".join(f"s.[{c}]" for c in all_cols)
-                    conn.execute(text(f"""
-                        INSERT INTO [{table_name}] WITH (ROWLOCK) ({insert_cols})
-                        SELECT {insert_vals}
-                        FROM [{temp_table}] s
-                        WHERE NOT EXISTS (
-                            SELECT 1 FROM [{table_name}] t WITH (NOLOCK) WHERE {pk_join}
+                    try:
+                        pk_join = " AND ".join(
+                            f"t.[{pk}] = s.[{pk}]" for pk in pk_cols
                         )
-                    """))
 
-                    conn.execute(text(f"DROP TABLE IF EXISTS [{temp_table}]"))
-                    conn.commit()
+                        # UPDATE existing rows (ROWLOCK = no table lock)
+                        updated = 0
+                        if update_cols:
+                            update_set = ", ".join(f"t.[{c}] = s.[{c}]" for c in update_cols)
+                            conn.execute(text(f"""
+                                UPDATE t WITH (ROWLOCK) SET {update_set}
+                                FROM [{table_name}] t
+                                INNER JOIN [{temp_table}] s ON {pk_join}
+                            """))
+                            updated = conn.connection.cursor().rowcount if hasattr(conn, 'connection') else 0
+
+                        # INSERT new rows (ROWLOCK)
+                        insert_cols = ", ".join(f"[{c}]" for c in all_cols)
+                        insert_vals = ", ".join(f"s.[{c}]" for c in all_cols)
+                        conn.execute(text(f"""
+                            INSERT INTO [{table_name}] WITH (ROWLOCK) ({insert_cols})
+                            SELECT {insert_vals}
+                            FROM [{temp_table}] s
+                            WHERE NOT EXISTS (
+                                SELECT 1 FROM [{table_name}] t WITH (NOLOCK) WHERE {pk_join}
+                            )
+                        """))
+                        conn.commit()
+                    finally:
+                        try:
+                            conn.execute(text(f"DROP TABLE IF EXISTS [{temp_table}]"))
+                            conn.commit()
+                        except Exception:
+                            pass
                     logger.info(f"Upserted {len(df)} rows into {table_name} (staging approach)")
                     return APIResponse(
                         success=True,

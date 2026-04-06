@@ -47,6 +47,9 @@ from app.api.v1.endpoints.trends import router as trends_router
 # Reports
 from app.api.v1.endpoints.reports import router as reports_router
 
+# Maintenance
+from app.api.v1.endpoints.maintenance import router as maintenance_router
+
 # Phase 6: Dashboard
 from app.api.v1.endpoints.dashboard import router as dashboard_router
 
@@ -98,3 +101,6 @@ api_router.include_router(trends_router)
 
 # Reports
 api_router.include_router(reports_router)
+
+# Maintenance (superadmin only)
+api_router.include_router(maintenance_router)

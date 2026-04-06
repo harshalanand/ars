@@ -14,6 +14,7 @@ from loguru import logger
 
 from app.core.config import get_settings
 from app.database.session import check_db_connection, check_data_db_connection, SessionLocal, enable_rcsi, Base, system_engine
+from app.services.tempdb_cleanup_service import tempdb_cleaner
 from app.api.v1.router import api_router
 from app.middleware.exception_handler import global_exception_handler, request_logging_middleware
 
@@ -94,9 +95,23 @@ async def lifespan(app: FastAPI):
         logger.warning(f"Could not clean up hanging jobs: {e}")
 
     logger.info(f"✅ {settings.APP_NAME} started on {settings.HOST}:{settings.PORT}")
+
+    # Start TempDB background cleanup service
+    try:
+        tempdb_cleaner.start()
+        logger.info("✅ TempDB cleanup service started")
+    except Exception as e:
+        logger.warning(f"TempDB cleanup service failed to start: {e}")
+
     yield
     logger.warning(f"Shutting down {settings.APP_NAME}...")
-    
+
+    # Stop TempDB cleanup service
+    try:
+        tempdb_cleaner.stop()
+    except Exception:
+        pass
+
     # Mark any currently running job as interrupted
     try:
         from app.models.audit import MSAStorageJob

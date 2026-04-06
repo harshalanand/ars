@@ -779,7 +779,7 @@ def save_msa_results(
     current_user: User = Depends(get_current_user)
 ):
     """
-    Save MSA calculation results to database tables (cl_msa, cl_generated_color, cl_color_variant)
+    Save MSA calculation results to database tables (ARS_MSA_TOTAL, ARS_MSA_GEN_ART, ARS_MSA_VAR_ART)
     
     Request Body:
         - msa: List of MSA analysis results
@@ -1052,9 +1052,9 @@ def get_storage_job_status(
         - status: Current status (queued, running, completed, failed)
         - total_rows: Total rows to process
         - processed_rows: Rows processed so far
-        - inserted_msa: Rows inserted into cl_msa
-        - inserted_colors: Rows inserted into cl_generated_color
-        - inserted_variants: Rows inserted into cl_color_variant
+        - inserted_msa: Rows inserted into ARS_MSA_TOTAL
+        - inserted_colors: Rows inserted into ARS_MSA_GEN_ART
+        - inserted_variants: Rows inserted into ARS_MSA_VAR_ART
         - error_message: Error message if failed
         - created_at: When job was created
         - started_at: When job started processing

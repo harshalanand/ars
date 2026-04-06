@@ -317,7 +317,7 @@ class UpsertEngine:
         4. One INSERT for new rows (short lock)
         5. Drop staging table
         """
-        staging = f"##bulk_stage_{batch_id}"
+        staging = f"#bulk_stage_{batch_id}"
         non_pk_cols = [c for c in df.columns if c not in primary_key_columns]
         total_rows = len(df)
 
@@ -461,7 +461,8 @@ class UpsertEngine:
         )
         chunk_df = chunk_df[~dedup_key.duplicated(keep='last')].copy()
 
-        temp_table = f"##upsert_temp_{batch_id}_{chunk_number}"
+        temp_table = f"#upsert_temp_{batch_id}_{chunk_number}"
+        output_table = f"#merge_output_{batch_id}_{chunk_number}"
         non_pk_columns = [c for c in chunk_df.columns if c not in primary_key_columns]
         changed_columns_count: Dict[str, int] = {}
         row_changes: List[Dict] = []
@@ -540,7 +541,6 @@ class UpsertEngine:
             cursor.execute(merge_sql)
 
             # 4. Collect MERGE output from the output table
-            output_table = f"##merge_output_{batch_id}_{chunk_number}"
             count_sql = f"""
                 SELECT
                     SUM(CASE WHEN action_type = 'INSERT' THEN 1 ELSE 0 END) as inserted,
@@ -587,6 +587,17 @@ class UpsertEngine:
 
         except Exception:
             conn.rollback()
+            try:
+                _c = conn.cursor()
+                _c.execute(
+                    f"IF OBJECT_ID('tempdb..{temp_table}') IS NOT NULL DROP TABLE {temp_table}"
+                )
+                _c.execute(
+                    f"IF OBJECT_ID('tempdb..{output_table}') IS NOT NULL DROP TABLE {output_table}"
+                )
+                conn.commit()
+            except Exception:
+                pass
             raise
         finally:
             conn.close()
@@ -603,7 +614,7 @@ class UpsertEngine:
         col_defs = []
         for col in df.columns:
             # Always use NVARCHAR for temp table to handle special markers
-            col_defs.append(f"[{col}] NVARCHAR(MAX) NULL")
+            col_defs.append(f"[{col}] NVARCHAR(500) NULL")
 
         return f"CREATE TABLE {temp_table} ({', '.join(col_defs)})"
 

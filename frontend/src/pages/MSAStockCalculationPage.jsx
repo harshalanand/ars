@@ -134,9 +134,9 @@ export default function MSAStockCalculationPage() {
     }
     
     // Export each table
-    if (calculationResults.msa) downloadCSV(calculationResults.msa, `MSA_Analysis_${date}.csv`);
-    if (calculationResults.msa_gen_clr) downloadCSV(calculationResults.msa_gen_clr, `Generated_Colors_${date}.csv`);
-    if (calculationResults.msa_gen_clr_var) downloadCSV(calculationResults.msa_gen_clr_var, `Color_Variants_${date}.csv`);
+    if (calculationResults.msa) downloadCSV(calculationResults.msa, `ARS_MSA_TOTAL_${date}.csv`);
+    if (calculationResults.msa_gen_clr) downloadCSV(calculationResults.msa_gen_clr, `ARS_MSA_GEN_ART_${date}.csv`);
+    if (calculationResults.msa_gen_clr_var) downloadCSV(calculationResults.msa_gen_clr_var, `ARS_MSA_VAR_ART_${date}.csv`);
   };
 
   // Export specific table by container ID
@@ -148,13 +148,13 @@ export default function MSAStockCalculationPage() {
     
     if (containerId === 'msa-results') {
       tableData = calculationResults.msa;
-      fileName = `MSA_Analysis_${date}.csv`;
+      fileName = `ARS_MSA_TOTAL_${date}.csv`;
     } else if (containerId === 'gen-clr-results') {
       tableData = calculationResults.msa_gen_clr;
-      fileName = `Generated_Colors_${date}.csv`;
+      fileName = `ARS_MSA_GEN_ART_${date}.csv`;
     } else if (containerId === 'variants-results') {
       tableData = calculationResults.msa_gen_clr_var;
-      fileName = `Color_Variants_${date}.csv`;
+      fileName = `ARS_MSA_VAR_ART_${date}.csv`;
     }
     
     downloadCSV(tableData, fileName);
@@ -174,9 +174,9 @@ export default function MSAStockCalculationPage() {
       console.log('📊 Populating tables now that they are in DOM...');
       // Use setTimeout to ensure DOM is fully updated
       setTimeout(() => {
-        displayTable('msa-results', calculationResults.msa, 'MSA Analysis');
-        displayTable('gen-clr-results', calculationResults.msa_gen_clr, 'Generated Colors');
-        displayTable('variants-results', calculationResults.msa_gen_clr_var, 'Color Variants');
+        displayTable('msa-results', calculationResults.msa, 'MSA Total (ARS_MSA_TOTAL)');
+        displayTable('gen-clr-results', calculationResults.msa_gen_clr, 'Generated Articles (ARS_MSA_GEN_ART)');
+        displayTable('variants-results', calculationResults.msa_gen_clr_var, 'Variant Articles (ARS_MSA_VAR_ART)');
       }, 0);
     }
   }, [calculationResults, expandResults]);
@@ -1179,23 +1179,23 @@ export default function MSAStockCalculationPage() {
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                   {calculationResults.msa && calculationResults.msa.length > 0 && (
                     <div className="p-3 bg-white rounded-lg border border-emerald-200">
-                      <div className="text-[10px] font-semibold text-gray-600 uppercase">MSA Analysis</div>
+                      <div className="text-[10px] font-semibold text-gray-600 uppercase">MSA Total</div>
                       <div className="text-[16px] font-bold text-emerald-600 mt-1">{calculationResults.msa.length}</div>
                       <p className="text-[10px] text-gray-500 mt-1">records processed</p>
                     </div>
                   )}
                   {calculationResults.msa_gen_clr && calculationResults.msa_gen_clr.length > 0 && (
                     <div className="p-3 bg-white rounded-lg border border-blue-200">
-                      <div className="text-[10px] font-semibold text-gray-600 uppercase">Generated Colors</div>
+                      <div className="text-[10px] font-semibold text-gray-600 uppercase">Generated Articles</div>
                       <div className="text-[16px] font-bold text-blue-600 mt-1">{calculationResults.msa_gen_clr.length}</div>
-                      <p className="text-[10px] text-gray-500 mt-1">color combinations</p>
+                      <p className="text-[10px] text-gray-500 mt-1">generated article records</p>
                     </div>
                   )}
                   {calculationResults.msa_gen_clr_var && calculationResults.msa_gen_clr_var.length > 0 && (
                     <div className="p-3 bg-white rounded-lg border border-purple-200">
-                      <div className="text-[10px] font-semibold text-gray-600 uppercase">Color Variants</div>
+                      <div className="text-[10px] font-semibold text-gray-600 uppercase">Variant Articles</div>
                       <div className="text-[16px] font-bold text-purple-600 mt-1">{calculationResults.msa_gen_clr_var.length}</div>
-                      <p className="text-[10px] text-gray-500 mt-1">variant records</p>
+                      <p className="text-[10px] text-gray-500 mt-1">variant article records</p>
                     </div>
                   )}
                 </div>
@@ -1299,7 +1299,7 @@ export default function MSAStockCalculationPage() {
                         </span>
                       </div>
                       <div className="text-[10px] text-gray-600 mt-1">
-                        📊 {seq.msa_row_count} MSA | 🎨 {seq.gen_color_row_count} Colors | 🔸 {seq.color_variant_row_count} Variants
+                        📊 {seq.msa_row_count} Total | 🎨 {seq.gen_color_row_count} Gen Articles | 🔸 {seq.color_variant_row_count} Var Articles
                       </div>
                       {seq.created_by && (
                         <div className="text-[9px] text-gray-500 mt-0.5">By: {seq.created_by}</div>

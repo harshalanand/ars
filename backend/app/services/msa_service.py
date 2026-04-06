@@ -551,11 +551,18 @@ class MSAService:
                 msa_gen_clr = pd.DataFrame()
                 logger.warning("Could not aggregate - using empty DataFrame")
 
+            # ============ RENAME ST_CD → RDC IN OUTPUT ============
+            rename_map = {"ST_CD": "RDC"}
+            msa_pivot.rename(columns=rename_map, inplace=True)
+            if not msa_gen_clr.empty:
+                msa_gen_clr.rename(columns=rename_map, inplace=True)
+            msa_gen_clr_var.rename(columns=rename_map, inplace=True)
+
             # ============ CONVERT TO DICTS AND RETURN ============
             msa_dict = msa_pivot.where(pd.notna(msa_pivot), None).to_dict("records")
-          
+
             gen_clr_dict = msa_gen_clr.where(pd.notna(msa_gen_clr), None).to_dict("records") if not msa_gen_clr.empty else []
-           
+
             var_dict = msa_gen_clr_var.where(pd.notna(msa_gen_clr_var), None).to_dict("records")
              # Debug: save color variant dict data
 

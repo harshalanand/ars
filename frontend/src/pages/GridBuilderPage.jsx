@@ -159,7 +159,7 @@ const ColPicker = ({ available, selected, onChange }) => {
 }
 
 /* ── Create / Edit Modal ──────────────────────────────────────────────────── */
-const EMPTY_FORM = { grid_name:'', description:'', hierarchy_columns:[], kpi_filter:'', output_table:'', status:'Active' }
+const EMPTY_FORM = { grid_name:'', description:'', hierarchy_columns:[], kpi_filter:'', output_table:'', status:'Active', pivot_only:false }
 
 const GridModal = ({ open, onClose, onSave, availableCols, editing }) => {
   const [form, setForm] = useState(EMPTY_FORM)
@@ -244,6 +244,16 @@ const GridModal = ({ open, onClose, onSave, availableCols, editing }) => {
                 placeholder="e.g. ARS_GRID_STK" style={{ fontFamily:'monospace', fontSize:12 }} />
               <span style={{ fontSize:10, color:C.textMuted }}>
                 Created/truncated on each run in Rep_data
+              </span>
+            </Field>
+            <Field label="Pivot Only">
+              <label style={{ display:'flex', alignItems:'center', gap:6, cursor:'pointer', fontSize:11 }}>
+                <input type="checkbox" checked={!!form.pivot_only} onChange={e => set('pivot_only', e.target.checked)}
+                  style={{ width:14, height:14 }} />
+                Skip lookups &amp; calculations (CONT, MBQ, OPT_CNT)
+              </label>
+              <span style={{ fontSize:10, color:C.textMuted }}>
+                Enable for article-level grids that only need the pivot output
               </span>
             </Field>
           </div>
@@ -590,11 +600,16 @@ export default function GridBuilderPage() {
 
                       {/* KPI filter */}
                       <td style={{ padding:'4px 8px' }}>
-                        {g.kpi_filter
-                          ? <span style={{ fontSize:9, fontWeight:700, color:C.amber,
-                              background:C.amberBg, border:`1px solid ${C.amberBd}`,
-                              padding:'1px 5px', borderRadius:3 }}>{g.kpi_filter}</span>
-                          : <span style={{ fontSize:9, color:C.textMuted }}>All</span>}
+                        <div style={{ display:'flex', gap:3, alignItems:'center' }}>
+                          {g.kpi_filter
+                            ? <span style={{ fontSize:9, fontWeight:700, color:C.amber,
+                                background:C.amberBg, border:`1px solid ${C.amberBd}`,
+                                padding:'1px 5px', borderRadius:3 }}>{g.kpi_filter}</span>
+                            : <span style={{ fontSize:9, color:C.textMuted }}>All</span>}
+                          {g.pivot_only && <span style={{ fontSize:7, fontWeight:700, color:'#7c3aed',
+                            background:'#ede9fe', border:'1px solid #c4b5fd',
+                            padding:'0px 4px', borderRadius:3 }}>PIVOT ONLY</span>}
+                        </div>
                       </td>
 
                       {/* Last run */}

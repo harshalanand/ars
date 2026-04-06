@@ -143,9 +143,9 @@ class MSAStorageJob(Base):
     status = Column(String(20), nullable=False, default='pending')  # pending, running, completed, failed
     total_rows = Column(Integer)  # Total rows across all three tables
     processed_rows = Column(Integer, default=0)
-    inserted_msa = Column(Integer, default=0)  # Rows inserted into cl_msa
-    inserted_colors = Column(Integer, default=0)  # Rows inserted into cl_generated_color
-    inserted_variants = Column(Integer, default=0)  # Rows inserted into cl_color_variant
+    inserted_msa = Column(Integer, default=0)  # Rows inserted into ARS_MSA_TOTAL
+    inserted_colors = Column(Integer, default=0)  # Rows inserted into ARS_MSA_GEN_ART
+    inserted_variants = Column(Integer, default=0)  # Rows inserted into ARS_MSA_VAR_ART
     error_message = Column(Text)
     error_details = Column(Text)  # JSON
     created_by = Column(String(100), nullable=False)

@@ -61,7 +61,7 @@ def get_dashboard_stats(
             
             # Get approximate row counts from sys.partitions (very fast)
             rows_result = data_db.execute(text("""
-                SELECT SUM(CAST(p.rows AS BIGINT)) as total_rows
+                SELECT SUM(CAST(p.[rows] AS BIGINT)) as total_rows
                 FROM sys.tables t
                 INNER JOIN sys.partitions p ON t.object_id = p.object_id
                 WHERE p.index_id IN (0, 1)  -- heap or clustered index

@@ -465,19 +465,32 @@ def _update_do_qty(output_df: pd.DataFrame, engine):
     agg.columns = ['alloc_no', 'vendor', 'material', 'store', 'qty']
 
     # Bulk update via temp table
-    tmp = "##do_qty_tmp"
-    agg.to_sql(tmp, engine, if_exists="replace", index=False)
-    with engine.connect() as conn:
-        conn.execute(text(f"""
+    import uuid as _u2
+    tmp = f"#do_qty_tmp_{_u2.uuid4().hex[:10]}"
+    raw = engine.raw_connection()
+    try:
+        cursor = raw.cursor()
+        # Create local temp table
+        cols_sql = ", ".join(f"[{c}] NVARCHAR(200)" for c in agg.columns[:-1])
+        cursor.execute(f"CREATE TABLE [{tmp}] ({cols_sql}, [qty] FLOAT)")
+        rows = [tuple(r) for r in agg.itertuples(index=False)]
+        cursor.executemany(f"INSERT INTO [{tmp}] VALUES({','.join(['?']*len(agg.columns))})", rows)
+        cursor.execute(f"""
             UPDATE a SET a.[DO_QTY] = ISNULL(a.[DO_QTY], 0) + t.[qty]
             FROM dbo.{table_name} a
-            INNER JOIN {tmp} t ON a.[Allocation Number] = t.[alloc_no]
+            INNER JOIN [{tmp}] t ON a.[Allocation Number] = t.[alloc_no]
                 AND a.[VENDOR] = t.[vendor]
                 AND a.[MATERIAL NO] = t.[material]
                 AND a.[RECEIVING STORE] = t.[store]
-        """))
-        conn.execute(text(f"DROP TABLE {tmp}"))
-        conn.commit()
+        """)
+        raw.commit()
+    finally:
+        try:
+            raw.cursor().execute(f"IF OBJECT_ID('tempdb..[{tmp}]') IS NOT NULL DROP TABLE [{tmp}]")
+            raw.commit()
+        except Exception:
+            pass
+        raw.close()
 
 
 def _ensure_do_qty_column(conn, table_name: str):
@@ -703,14 +716,16 @@ async def upload_delivery_order(
         do_df["DO_QTY"] = pd.to_numeric(do_df["DO_QTY"], errors="coerce").fillna(0).clip(-2147483647, 2147483647).astype(int)
 
         # Use raw pyodbc: create temp table → bulk insert → single UPDATE JOIN
+        import uuid as _uuid
+        _do_suffix = _uuid.uuid4().hex[:10]
         raw_conn = engine.raw_connection()
         try:
             cursor = raw_conn.cursor()
             cursor.fast_executemany = True
 
-            # 1. Create temp table — all NVARCHAR for safe comparison
-            cursor.execute("""
-                CREATE TABLE ##do_update (
+            # 1. Create local temp table — all NVARCHAR for safe comparison
+            cursor.execute(f"""
+                CREATE TABLE #do_update_{_do_suffix} (
                     v NVARCHAR(50), s NVARCHAR(50), m NVARCHAR(50), a NVARCHAR(50), q INT
                 )
             """)
@@ -723,12 +738,12 @@ async def upload_delivery_order(
                 do_df["Allocation Number"].tolist(),
                 do_df["DO_QTY"].tolist(),
             ))
-            cursor.executemany("INSERT INTO ##do_update(v,s,m,a,q) VALUES(?,?,?,?,?)", rows)
+            cursor.executemany(f"INSERT INTO #do_update_{_do_suffix}(v,s,m,a,q) VALUES(?,?,?,?,?)", rows)
 
             # 3. Check sample for debug
             cursor.execute(f"SELECT TOP 2 [VENDOR],[RECEIVING STORE],CAST([MATERIAL NO] AS NVARCHAR(50)),[Allocation Number] FROM dbo.{table_name}")
             logger.info(f"DO DB sample: {cursor.fetchall()}")
-            cursor.execute("SELECT TOP 2 v,s,m,a FROM ##do_update")
+            cursor.execute(f"SELECT TOP 2 v,s,m,a FROM #do_update_{_do_suffix}")
             logger.info(f"DO File sample: {cursor.fetchall()}")
 
             # 4. UPDATE JOIN — all comparisons as NVARCHAR
@@ -736,7 +751,7 @@ async def upload_delivery_order(
                 UPDATE t
                 SET t.[DO_QTY] = CAST(u.q AS INT)
                 FROM dbo.{table_name} t
-                INNER JOIN ##do_update u
+                INNER JOIN #do_update_{_do_suffix} u
                     ON LTRIM(RTRIM(CAST(t.[VENDOR] AS NVARCHAR(50)))) = LTRIM(RTRIM(u.v))
                     AND LTRIM(RTRIM(CAST(t.[RECEIVING STORE] AS NVARCHAR(50)))) = LTRIM(RTRIM(u.s))
                     AND LTRIM(RTRIM(CAST(t.[MATERIAL NO] AS NVARCHAR(50)))) = LTRIM(RTRIM(u.m))
@@ -745,10 +760,17 @@ async def upload_delivery_order(
             updated_count = cursor.rowcount
             logger.info(f"DO updated: {updated_count}")
 
-            # 5. Cleanup
-            cursor.execute("DROP TABLE ##do_update")
             raw_conn.commit()
         finally:
+            try:
+                _cc = raw_conn.cursor()
+                _cc.execute(
+                    f"IF OBJECT_ID('tempdb..#do_update_{_do_suffix}') IS NOT NULL "
+                    f"DROP TABLE #do_update_{_do_suffix}"
+                )
+                raw_conn.commit()
+            except Exception:
+                pass
             raw_conn.close()
 
         not_found_count = len(do_df) - updated_count if updated_count < len(do_df) else 0

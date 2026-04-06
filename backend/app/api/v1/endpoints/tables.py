@@ -448,7 +448,7 @@ async def get_table_row_count(
             engine = get_data_engine()
             with engine.connect() as conn:
                 result = conn.execute(text("""
-                    SELECT SUM(p.rows) as row_count
+                    SELECT SUM(p.[rows]) as row_count
                     FROM sys.tables t
                     INNER JOIN sys.partitions p ON t.object_id = p.object_id
                     WHERE t.name = :table_name AND p.index_id IN (0, 1)
@@ -677,7 +677,7 @@ async def list_all_table_settings(
         with data_engine.connect() as conn:
             result = conn.execute(text("""
                 SELECT t.name as table_name, 
-                       SUM(p.rows) as row_count
+                       SUM(p.[rows]) as row_count
                 FROM sys.tables t
                 LEFT JOIN sys.partitions p ON t.object_id = p.object_id AND p.index_id IN (0, 1)
                 WHERE t.type = 'U'

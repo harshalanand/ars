@@ -1,7 +1,7 @@
 """
 MSA Result Storage Service
-Handles storing MSA calculation results into database tables with sequence tracking
-and automatic column management for new calculated fields
+Handles storing MSA calculation results into ARS_MSA_TOTAL, ARS_MSA_GEN_ART,
+ARS_MSA_VAR_ART tables with sequence tracking and automatic column management
 """
 import pandas as pd
 import json
@@ -22,12 +22,57 @@ class MSAResultStorageService:
         """
         self.db = db
         self.result_tables = {
-            'msa': 'dbo.cl_msa',
-            'msa_gen_clr': 'dbo.cl_generated_color',
-            'msa_gen_clr_var': 'dbo.cl_color_variant'
+            'msa': 'dbo.ARS_MSA_TOTAL',
+            'msa_gen_clr': 'dbo.ARS_MSA_GEN_ART',
+            'msa_gen_clr_var': 'dbo.ARS_MSA_VAR_ART'
         }
         self.tracking_table = 'dbo.MSA_Calculation_Sequence'
         self.column_definitions_table = 'dbo.MSA_Column_Definitions'
+        self._ensure_tables_exist()
+
+    def _ensure_tables_exist(self):
+        """Auto-create ARS_MSA_* tables if they don't exist, or recreate if id has no IDENTITY."""
+        try:
+            connection = self.db.connection().connection
+            cursor = connection.cursor()
+            try:
+                for key, db_table in self.result_tables.items():
+                    table_name = db_table.split('.')[-1]
+                    # Check if table exists and id column has IDENTITY
+                    cursor.execute(f"""
+                        SELECT COLUMNPROPERTY(OBJECT_ID(N'dbo.{table_name}'), 'id', 'IsIdentity')
+                    """)
+                    row = cursor.fetchone()
+                    is_identity = row[0] if row and row[0] is not None else None
+
+                    if is_identity == 1:
+                        # Table exists with correct IDENTITY — nothing to do
+                        continue
+
+                    # Drop if exists (broken schema) then recreate
+                    cursor.execute(f"""
+                        IF EXISTS (SELECT * FROM sys.objects
+                                   WHERE object_id = OBJECT_ID(N'[dbo].[{table_name}]')
+                                   AND type in (N'U'))
+                            DROP TABLE [dbo].[{table_name}];
+                    """)
+                    cursor.execute(f"""
+                        CREATE TABLE [dbo].[{table_name}] (
+                            [id] INT PRIMARY KEY IDENTITY(1,1),
+                            [sequence_id] INT NOT NULL
+                        );
+                    """)
+                    cursor.execute(f"""
+                        CREATE NONCLUSTERED INDEX [IX_{table_name}_sequence_id]
+                            ON [dbo].[{table_name}]([sequence_id]);
+                    """)
+                    logger.info(f"Created table dbo.{table_name} with IDENTITY")
+                connection.commit()
+                logger.info("ARS_MSA_* tables verified/created")
+            finally:
+                cursor.close()
+        except Exception as e:
+            logger.warning(f"Could not auto-create ARS tables: {e}")
 
     # ========================================================================
     # Sequence Management
@@ -176,7 +221,7 @@ class MSAResultStorageService:
             return columns
         except Exception as e:
             logger.warning(f"Error getting existing columns for {table_name}: {e}")
-            return ['id', 'sequence_id', 'calculation_date', 'created_by', 'created_at', 'updated_at']
+            return ['id', 'sequence_id']
 
     def get_new_columns(self, table_name: str, data: List[Dict]) -> List[str]:
         """
@@ -194,7 +239,7 @@ class MSAResultStorageService:
         
         existing = set(self.get_existing_columns(table_name))
         data_columns = set(data[0].keys()) if data else set()
-        reserved_columns = {'id', 'sequence_id', 'calculation_date', 'created_by', 'created_at', 'updated_at'}
+        reserved_columns = {'id', 'sequence_id'}
         
         new_columns = list(data_columns - existing - reserved_columns)
         
@@ -274,11 +319,7 @@ class MSAResultStorageService:
             finally:
                 cursor.close()
                 # Don't close connection - SQLAlchemy manages it
-                
-        except Exception as e:
-            logger.error(f"❌ Error in create_columns: {e}")
-            raise
-                
+
         except Exception as e:
             logger.error(f"❌ Error in create_columns: {e}")
             raise
@@ -401,7 +442,7 @@ class MSAResultStorageService:
                 insert_row = {'sequence_id': sequence_id}
 
                 for col in existing_columns:
-                    if col in ['id', 'sequence_id', 'calculation_date', 'created_by', 'created_at', 'updated_at']:
+                    if col in ['id', 'sequence_id']:
                         continue
 
                     insert_row[col] = row.get(col)
@@ -418,7 +459,7 @@ class MSAResultStorageService:
 
                 column_list = [
                     col for col in existing_columns
-                    if col not in ['id', 'calculation_date', 'created_at', 'updated_at']
+                    if col not in ['id']
                 ]
 
                 if 'sequence_id' not in column_list:

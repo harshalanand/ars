@@ -45,6 +45,7 @@ class GridCreate(BaseModel):
     kpi_filter:        Optional[str] = None # e.g. 'STK'  – filters on sloc KPI
     output_table:      str                 # e.g. ARS_GRID_STK_RESULT
     status:            str = "Active"
+    pivot_only:        bool = False         # True = only pivot, skip lookups & MBQ/OPT_CNT
 
     @validator("status")
     def _chk(cls, v):
@@ -73,6 +74,7 @@ class GridUpdate(BaseModel):
     kpi_filter:        Optional[str]       = None
     output_table:      Optional[str]       = None
     status:            Optional[str]       = None
+    pivot_only:        Optional[bool]      = None
 
     @validator("status")
     def _chk(cls, v):
@@ -86,6 +88,21 @@ class GridUpdate(BaseModel):
 def _run(conn, sql: str, params: dict = None):
     conn.execute(text(sql), params or {})
     conn.commit()
+
+
+def _shrink_db_files(engine):
+    """Shrink data DB files after heavy TRUNCATE/DROP to reclaim space."""
+    try:
+        with engine.connect() as conn:
+            files = conn.execute(text(
+                "SELECT name FROM sys.database_files WHERE type_desc = 'ROWS'"
+            )).fetchall()
+            for (fname,) in files:
+                conn.execute(text(f"DBCC SHRINKFILE ([{fname}], TRUNCATEONLY) WITH NO_INFOMSGS"))
+                conn.commit()
+            logger.info(f"SHRINKFILE completed for {len(files)} file(s)")
+    except Exception as e:
+        logger.warning(f"SHRINKFILE failed: {e}")
 
 
 def _ensure_grid_table(engine):
@@ -129,6 +146,14 @@ def _ensure_grid_table(engine):
                 ALTER TABLE {GRID_TABLE} ADD duration_sec FLOAT NULL
             END
         """)
+        # Add pivot_only flag (1 = skip lookups & MBQ/OPT_CNT, just pivot)
+        _run(c, f"""
+            IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+                           WHERE TABLE_NAME='{GRID_TABLE}' AND COLUMN_NAME='pivot_only')
+            BEGIN
+                ALTER TABLE {GRID_TABLE} ADD pivot_only BIT NOT NULL DEFAULT 0
+            END
+        """)
         # Auto-assign sequence where seq=0 based on id order
         _run(c, f"""
             ;WITH CTE AS (
@@ -168,6 +193,7 @@ def _row_to_dict(r) -> dict:
         "last_run_rows":     r[12],
         "last_run_error":    r[13],
         "duration_sec":      r[14] if len(r) > 14 else None,
+        "pivot_only":        bool(r[15]) if len(r) > 15 else False,
     }
 
 
@@ -387,6 +413,37 @@ def _apply_post_lookups(conn, out_table: str, hier_cols: List[str]) -> List[str]
             INNER JOIN [{lookup_table}] L WITH (NOLOCK) ON {join_parts}
         """)
         logger.info(f"Post-lookup: joined {len(columns)} cols from {lookup_table} into {out_table}")
+
+        # CONT fallback: if store-level CONT is NULL, use CO (company) level
+        if "Master_CONT_" in cfg.get("lookup_table", "") and "CONT" in columns:
+            # Check if lookup table has ST_CD column (it should)
+            has_st_cd = conn.execute(text(
+                "SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS "
+                "WHERE TABLE_NAME = :tbl AND COLUMN_NAME = 'ST_CD'"
+            ), {"tbl": lookup_table}).scalar() > 0
+            if has_st_cd:
+                # Build CO join: same as original join but replace WERKS=ST_CD with ST_CD='CO'
+                co_join_parts = []
+                for ok, lv in join_on.items():
+                    resolved_ok = hier_upper.get(ok.upper(), ok)
+                    if lv.upper() == "ST_CD":
+                        co_join_parts.append(f"L.[ST_CD] = 'CO'")
+                    else:
+                        co_join_parts.append(f"O.[{resolved_ok}] = L.[{lv}]")
+                co_join = " AND ".join(co_join_parts)
+
+                co_set = ", ".join(f"O.[{c}] = L.[{c}]" for c in columns)
+                null_check = " AND ".join(f"O.[{c}] IS NULL" for c in columns)
+                _run(conn, f"""
+                    UPDATE O SET {co_set}
+                    FROM [{out_table}] O
+                    INNER JOIN [{lookup_table}] L WITH (NOLOCK) ON {co_join}
+                    WHERE {null_check}
+                """)
+                co_count = conn.execute(text(
+                    f"SELECT COUNT(*) FROM [{out_table}] WHERE [CONT] IS NOT NULL"
+                )).scalar()
+                logger.info(f"CONT CO fallback applied — {co_count} rows now have CONT")
 
         # Apply filter: DELETE rows that don't match criteria
         flt = cfg.get("filter")
@@ -669,12 +726,14 @@ ORDER BY {', '.join(f'[{c}]' for c in hier_cols)};
         conn.execute(text(insert_sql))
         conn.commit()
 
-        # ── 6. Post-pivot lookups ───────────────────────────────────────────
-        lookup_warnings = _apply_post_lookups(conn, out_table, hier_cols)
-
-        # ── 7. Grid-level MBQ & OPT_CNT (needs CONT from step 6)
-        grid_calc_warnings = _calculate_grid_columns(conn, out_table)
-        lookup_warnings.extend(grid_calc_warnings)
+        # ── 6. Post-pivot lookups & 7. MBQ/OPT_CNT ──────────────────────
+        lookup_warnings = []
+        if grid.get("pivot_only"):
+            logger.info(f"Pivot-only mode: skipping lookups & calculations for {out_table}")
+        else:
+            lookup_warnings = _apply_post_lookups(conn, out_table, hier_cols)
+            grid_calc_warnings = _calculate_grid_columns(conn, out_table)
+            lookup_warnings.extend(grid_calc_warnings)
 
         # Count inserted rows
         count_row = conn.execute(text(f"SELECT COUNT(*) FROM [{out_table}]")).fetchone()
@@ -708,7 +767,7 @@ def list_grids(current_user: User = Depends(get_current_user)):
             SELECT id, grid_name, description, hierarchy_columns,
                    kpi_filter, output_table, status, seq,
                    created_at, updated_at,
-                   last_run_at, last_run_status, last_run_rows, last_run_error, duration_sec
+                   last_run_at, last_run_status, last_run_rows, last_run_error, duration_sec, pivot_only
             FROM {GRID_TABLE}
             ORDER BY seq ASC, id ASC
         """)).fetchall()
@@ -748,9 +807,9 @@ def create_grid(payload: GridCreate, current_user: User = Depends(get_current_us
         max_seq = conn.execute(text(f"SELECT ISNULL(MAX(seq),0) FROM {GRID_TABLE}")).scalar() or 0
         conn.execute(text(f"""
             INSERT INTO {GRID_TABLE}
-                (grid_name, description, hierarchy_columns, kpi_filter, output_table, status, seq, last_run_error, created_at, updated_at)
+                (grid_name, description, hierarchy_columns, kpi_filter, output_table, status, seq, last_run_error, pivot_only, created_at, updated_at)
             VALUES
-                (:name, :desc, :hier, :kpi, :out, :status, :seq, :warn, GETDATE(), GETDATE())
+                (:name, :desc, :hier, :kpi, :out, :status, :seq, :warn, :ponly, GETDATE(), GETDATE())
         """), {
             "name":   payload.grid_name,
             "desc":   payload.description,
@@ -760,6 +819,7 @@ def create_grid(payload: GridCreate, current_user: User = Depends(get_current_us
             "status": payload.status,
             "seq":    max_seq + 1,
             "warn":   warn_msg,
+            "ponly":  1 if payload.pivot_only else 0,
         })
         conn.commit()
     return APIResponse(success=True, message=f"Grid '{payload.grid_name}' created.",
@@ -779,6 +839,7 @@ def update_grid(grid_id: int, payload: GridUpdate, current_user: User = Depends(
     if payload.kpi_filter        is not None: sets.append("kpi_filter=:kpi_filter");       params["kpi_filter"]        = payload.kpi_filter
     if payload.output_table      is not None: sets.append("output_table=:output_table");   params["output_table"]      = payload.output_table.upper()
     if payload.status            is not None: sets.append("status=:status");               params["status"]            = payload.status
+    if payload.pivot_only        is not None: sets.append("pivot_only=:ponly");             params["ponly"]             = 1 if payload.pivot_only else 0
     if not sets:
         raise HTTPException(400, "No fields to update")
     sets.append("updated_at=GETDATE()")
@@ -836,7 +897,7 @@ def run_grid(grid_id: int, current_user: User = Depends(get_current_user)):
             SELECT id, grid_name, description, hierarchy_columns,
                    kpi_filter, output_table, status, seq,
                    created_at, updated_at,
-                   last_run_at, last_run_status, last_run_rows, last_run_error, duration_sec
+                   last_run_at, last_run_status, last_run_rows, last_run_error, duration_sec, pivot_only
             FROM {GRID_TABLE} WHERE id=:id
         """), {"id": grid_id}).fetchone()
 
@@ -966,7 +1027,7 @@ def run_all_active(current_user: User = Depends(get_current_user)):
             SELECT id, grid_name, description, hierarchy_columns,
                    kpi_filter, output_table, status, seq,
                    created_at, updated_at,
-                   last_run_at, last_run_status, last_run_rows, last_run_error, duration_sec
+                   last_run_at, last_run_status, last_run_rows, last_run_error, duration_sec, pivot_only
             FROM {GRID_TABLE} WHERE status='Active' ORDER BY seq ASC, id ASC
         """)).fetchall()
 
@@ -995,6 +1056,10 @@ def run_all_active(current_user: User = Depends(get_current_user)):
     results.sort(key=lambda r: name_order.get(r["grid_name"], 999))
 
     success_count = sum(1 for r in results if r["status"] == "Success")
+
+    # Reclaim space after heavy TRUNCATE + INSERT cycle
+    _shrink_db_files(de)
+
     return APIResponse(success=True,
         message=f"Run All complete: {success_count}/{len(results)} grids succeeded.",
         data={"results": results})
