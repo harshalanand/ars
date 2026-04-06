@@ -29,6 +29,7 @@ import BDCCreationPage from '@/pages/BDCCreationPage'
 import StoreStockPage from '@/pages/StoreStockPage'
 import GridBuilderPage from '@/pages/GridBuilderPage'
 import LookupArtMasterPage from '@/pages/LookupArtMasterPage'
+import ListingPage from '@/pages/ListingPage'
 import PendAlcReportPage from '@/pages/PendAlcReportPage'
 import ChecklistPage from '@/pages/ChecklistPage'
 import TrendUploadPage from '@/pages/TrendUploadPage'
@@ -99,6 +100,7 @@ export default function App() {
         {/* Data Preparation - Grid Builder */}
         <Route path="data-prep/store-stock" element={<ProtectedRoute permission="GRID_VIEW"><GridBuilderPage /></ProtectedRoute>} />
         <Route path="data-prep/lookup-art-master" element={<ProtectedRoute permission="LOOKUP_VIEW"><LookupArtMasterPage /></ProtectedRoute>} />
+        <Route path="data-prep/listing" element={<ErrorBoundary><ListingPage /></ErrorBoundary>} />
         {/* Trends */}
         <Route path="trends/dashboard" element={<ProtectedRoute permission="TRENDS_DASHBOARD"><ErrorBoundary><TrendDashboardPage /></ErrorBoundary></ProtectedRoute>} />
         <Route path="trends/upload" element={<ProtectedRoute permission="TRENDS_UPLOAD"><ErrorBoundary><TrendUploadPage /></ErrorBoundary></ProtectedRoute>} />

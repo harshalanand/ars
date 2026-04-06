@@ -102,5 +102,9 @@ api_router.include_router(trends_router)
 # Reports
 api_router.include_router(reports_router)
 
+# Listing
+from app.api.v1.endpoints.listing import router as listing_router
+api_router.include_router(listing_router)
+
 # Maintenance (superadmin only)
 api_router.include_router(maintenance_router)

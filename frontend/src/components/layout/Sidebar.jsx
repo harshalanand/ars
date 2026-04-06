@@ -3,7 +3,7 @@ import {
   LayoutDashboard, Table2, Upload, PackageCheck, Users, Shield, Eye, ScrollText,
   ChevronLeft, ChevronRight, Box, ChevronDown, FolderOpen, FilePlus, FileUp, Plus,
   FileDown, Edit3, Settings, Database, Columns, BarChart3, Cpu, Cog, Activity,
-  Clock, Truck, FileText, ClipboardCheck, ShieldCheck, LayoutGrid, Search, TrendingUp
+  Clock, Truck, FileText, ClipboardCheck, ShieldCheck, LayoutGrid, Search, TrendingUp, List
 } from 'lucide-react'
 import useAuthStore from '@/store/authStore'
 import clsx from 'clsx'
@@ -30,6 +30,7 @@ const dataPreparationItems = [
   { label: 'BDC Creation', path: '/bdc', icon: FileText, permission: 'BDC_VIEW' },
   { label: 'Grid Builder', path: '/data-prep/store-stock', icon: LayoutGrid, permission: 'GRID_VIEW' },
   { label: 'Lookup Art Master', path: '/data-prep/lookup-art-master', icon: Search, permission: 'LOOKUP_VIEW' },
+  { label: 'Listing', path: '/data-prep/listing', icon: List },
 ]
 
 // Contribution Percentage submenu

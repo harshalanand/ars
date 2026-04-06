@@ -94,7 +94,16 @@ def _table_exists(conn, tbl: str) -> bool:
 
 def _row_count(conn, tbl: str) -> Optional[int]:
     try:
-        return conn.execute(text(f"SELECT COUNT(*) FROM [{tbl}]")).scalar()
+        # Use partition stats for fast approximate count (avoids full table scan)
+        cnt = conn.execute(text("""
+            SELECT SUM(p.rows) FROM sys.partitions p
+            JOIN sys.tables t ON p.object_id = t.object_id
+            WHERE t.name = :tbl AND p.index_id IN (0, 1)
+        """), {"tbl": tbl}).scalar()
+        if cnt is not None:
+            return int(cnt)
+        # Fallback for views
+        return conn.execute(text(f"SELECT COUNT_BIG(*) FROM [{tbl}]")).scalar()
     except Exception:
         return None
 

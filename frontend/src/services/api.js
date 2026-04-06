@@ -290,6 +290,14 @@ export const gridBuilderAPI = {
   calcPreview: ()           => api.get('/grid-builder/calculation-preview'),
 }
 
+// ============== Listing (Data Preparation) ==============
+export const listingAPI = {
+  config:   ()           => api.get('/listing/config'),
+  generate: (data)       => api.post('/listing/generate', data, { timeout: 600000 }),
+  preview:  (params)     => api.get('/listing/preview', { params }),
+  summary:  ()           => api.get('/listing/summary'),
+}
+
 // ============== Lookup Art Master (Data Preparation) ==============
 export const lookupArtMasterAPI = {
   getColumns: () => api.get('/lookup-art-master/columns'),
