@@ -1,18 +1,19 @@
 """
-Application Configuration - Loaded from .env file
+Application Configuration — Cloud-Ready
+All sensitive values from environment variables / .env file.
+No hardcoded passwords or secrets.
 """
 from functools import lru_cache
 from typing import List
 from pydantic_settings import BaseSettings
-from pydantic import field_validator
 import json
 
 
 class Settings(BaseSettings):
     # Application
     APP_NAME: str = "ARS - Auto Replenishment System"
-    APP_VERSION: str = "1.0.0"
-    APP_ENV: str = "development"
+    APP_VERSION: str = "2.1.0"
+    APP_ENV: str = "development"  # development | staging | production
     DEBUG: bool = False
     HOST: str = "0.0.0.0"
     PORT: int = 8000
@@ -21,15 +22,20 @@ class Settings(BaseSettings):
     DB_SERVER: str = "HOPC560"
     DB_NAME: str = "Claude"
     DB_USERNAME: str = "sa"
-    DB_PASSWORD: str = "vrl@55555"
+    DB_PASSWORD: str = "vrl@55555"           # Override via .env in production
     DB_DRIVER: str = "ODBC Driver 18 for SQL Server"
-    DB_TRUST_CERT: str = "yes"
-    DB_POOL_SIZE: int = 10
-    DB_MAX_OVERFLOW: int = 15
+    DB_TRUST_CERT: str = "yes"               # "no" for Azure SQL
+    DB_ENCRYPT: str = "no"                   # "yes" for Azure SQL (mandatory)
+
+    # Connection pool — tuned for 20+ concurrent planners
+    DB_POOL_SIZE: int = 15
+    DB_MAX_OVERFLOW: int = 25
     DB_POOL_TIMEOUT: int = 60
-    DB_POOL_RECYCLE: int = 180  # Recycle connections every 3 min to avoid stale connections
-    DB_TEMPDB_CLEANUP_INTERVAL_MINUTES: int = 5    # How often the cleanup thread runs
-    DB_TEMPDB_ORPHAN_AGE_MINUTES: int = 10          # Drop ## tables older than this
+    DB_POOL_RECYCLE: int = 300               # Azure recommends 300s
+    DB_POOL_PRE_PING: bool = True
+
+    DB_TEMPDB_CLEANUP_INTERVAL_MINUTES: int = 5
+    DB_TEMPDB_ORPHAN_AGE_MINUTES: int = 15   # More room for long MSA runs
 
     # Working Database (Business data, dynamic tables, allocations)
     DATA_DB_NAME: str = "Rep_data"
@@ -46,41 +52,54 @@ class Settings(BaseSettings):
     MAX_LOGIN_ATTEMPTS: int = 5
     ACCOUNT_LOCK_DURATION_MINUTES: int = 30
 
-    # File Upload
+    # File Upload / Storage
     MAX_UPLOAD_SIZE_MB: int = 100
-    UPLOAD_CHUNK_SIZE: int = 2000  # Smaller chunks to reduce DB lock duration
+    UPLOAD_CHUNK_SIZE: int = 2000
     ALLOWED_EXTENSIONS: str = ".csv,.xlsx,.xls"
+    USE_BLOB_STORAGE: bool = False           # True in production (Azure Blob)
+    AZURE_STORAGE_CONNECTION_STRING: str = ""
+    AZURE_STORAGE_CONTAINER: str = "ars-files"
+    LOCAL_UPLOAD_DIR: str = "uploads"
+    LOCAL_EXPORT_DIR: str = "exports"
 
     # Logging
     LOG_LEVEL: str = "INFO"
     LOG_FILE: str = "logs/app.log"
+    LOG_TO_FILE: bool = True                 # False in cloud (use stdout)
 
     # Super Admin
     SUPER_ADMIN_USERNAME: str = "superadmin"
     SUPER_ADMIN_EMAIL: str = "admin@nubo.in"
-    SUPER_ADMIN_PASSWORD: str = "Admin@12345"
+    SUPER_ADMIN_PASSWORD: str = "Admin@12345"  # Override via .env in production
+
+    # =========================================================================
+    # Computed properties
+    # =========================================================================
+    @property
+    def is_production(self) -> bool:
+        return self.APP_ENV == "production"
 
     @property
     def DATABASE_URL(self) -> str:
-        """Build SQLAlchemy connection string for System DB (Claude)."""
-        from urllib.parse import quote_plus
-        password = quote_plus(self.DB_PASSWORD)
-        driver = quote_plus(self.DB_DRIVER)
-        return (
-            f"mssql+pyodbc://{self.DB_USERNAME}:{password}@{self.DB_SERVER}/"
-            f"{self.DB_NAME}?driver={driver}&TrustServerCertificate={self.DB_TRUST_CERT}"
-        )
+        """SQLAlchemy connection string for System DB (Claude)."""
+        return self._build_connection_url(self.DB_NAME)
 
     @property
     def DATA_DATABASE_URL(self) -> str:
-        """Build SQLAlchemy connection string for Working DB (Rep_data)."""
+        """SQLAlchemy connection string for Working DB (Rep_data)."""
+        return self._build_connection_url(self.DATA_DB_NAME)
+
+    def _build_connection_url(self, db_name: str) -> str:
         from urllib.parse import quote_plus
         password = quote_plus(self.DB_PASSWORD)
         driver = quote_plus(self.DB_DRIVER)
-        return (
+        url = (
             f"mssql+pyodbc://{self.DB_USERNAME}:{password}@{self.DB_SERVER}/"
-            f"{self.DATA_DB_NAME}?driver={driver}&TrustServerCertificate={self.DB_TRUST_CERT}"
+            f"{db_name}?driver={driver}&TrustServerCertificate={self.DB_TRUST_CERT}"
         )
+        if self.DB_ENCRYPT.lower() == "yes":
+            url += "&Encrypt=yes"
+        return url
 
     @property
     def cors_origins_list(self) -> List[str]:

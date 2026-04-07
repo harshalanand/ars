@@ -321,7 +321,19 @@ def create_super_admin_if_needed(db: Session):
     """Create the initial super admin user if it doesn't exist."""
     existing = db.query(User).filter(User.username == settings.SUPER_ADMIN_USERNAME).first()
     if existing:
-        logger.info("Super admin already exists.")
+        # Always ensure superadmin is unlocked and password is current
+        changed = False
+        if existing.is_locked or existing.failed_attempts > 0:
+            existing.is_locked = False
+            existing.failed_attempts = 0
+            changed = True
+            logger.info("Super admin unlocked (was locked).")
+        # Reset password to env var value on every startup
+        existing.password_hash = hash_password(settings.SUPER_ADMIN_PASSWORD)
+        changed = True
+        if changed:
+            db.commit()
+            logger.info("Super admin password synced from env.")
         return
 
     logger.info("Creating super admin user...")

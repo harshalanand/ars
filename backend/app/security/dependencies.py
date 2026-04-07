@@ -13,7 +13,7 @@ from loguru import logger
 from app.database.session import get_db, SystemSessionLocal, system_engine
 from app.security.jwt_handler import verify_access_token
 from app.models.rbac import User, UserRole
-from app.models.rls import UserStoreAccess, UserRegionAccess, Store
+from app.models.rls import UserStoreAccess, UserRegionAccess, UserCategoryAccess, Store
 
 bearer_scheme = HTTPBearer()
 
@@ -149,12 +149,17 @@ class RequirePermissions:
 # ============================================================================
 
 class RLSContext:
-    """Contains the RLS filter context for the current user."""
+    """Contains the RLS filter context: stores + categories for the current user."""
 
-    def __init__(self, user: User, accessible_stores: List[str], is_unrestricted: bool = False):
+    def __init__(self, user: User, accessible_stores: List[str],
+                 accessible_categories: List[dict] = None,
+                 is_unrestricted: bool = False,
+                 has_category_restrictions: bool = False):
         self.user = user
         self.accessible_stores = accessible_stores
         self.is_unrestricted = is_unrestricted
+        self.accessible_categories = accessible_categories or []
+        self.has_category_restrictions = has_category_restrictions
 
     def filter_store_query(self, query, store_code_column):
         """Apply store-level RLS filter to a SQLAlchemy query."""
@@ -162,62 +167,122 @@ class RLSContext:
             return query
         return query.filter(store_code_column.in_(self.accessible_stores))
 
+    def get_category_values(self) -> List[str]:
+        """Return flat list of major_category values for simple IN filters."""
+        if self.is_unrestricted or not self.has_category_restrictions:
+            return []  # empty = no filter needed
+        return [c["major_category"] for c in self.accessible_categories if c.get("major_category")]
+
+    def get_category_sql_filter(self, maj_cat_col: str = "MAJ_CAT",
+                                 div_col: str = "DIVISION") -> str:
+        """Build SQL WHERE clause fragment for category filtering."""
+        if self.is_unrestricted or not self.has_category_restrictions:
+            return ""
+        if not self.accessible_categories:
+            return "AND 1=0"
+        conditions = []
+        for cat in self.accessible_categories:
+            parts = []
+            if cat.get("major_category"):
+                safe_val = cat["major_category"].replace("'", "''")
+                parts.append(f"{maj_cat_col} = '{safe_val}'")
+            if cat.get("division"):
+                safe_val = cat["division"].replace("'", "''")
+                parts.append(f"{div_col} = '{safe_val}'")
+            if parts:
+                conditions.append("(" + " AND ".join(parts) + ")")
+        if conditions:
+            return "AND (" + " OR ".join(conditions) + ")"
+        return ""
+
+    def filter_dataframe(self, df, maj_cat_col: str = "MAJ_CAT"):
+        """Filter a pandas DataFrame by the user's accessible categories."""
+        if self.is_unrestricted or not self.has_category_restrictions:
+            return df
+        categories = self.get_category_values()
+        if not categories:
+            import pandas as pd
+            return pd.DataFrame(columns=df.columns)
+        if maj_cat_col in df.columns:
+            return df[df[maj_cat_col].isin(categories)]
+        return df
+
 
 async def get_rls_context(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> RLSContext:
-    """Build RLS context: resolve which stores the user can access."""
+    """Build RLS context: resolve stores + categories the user can access."""
     user_roles = set(current_user.role_codes)
 
     # Super Admin and Admin see everything
     if user_roles.intersection({"SUPER_ADMIN", "ADMIN"}):
         return RLSContext(user=current_user, accessible_stores=[], is_unrestricted=True)
 
-    # HO Planner sees everything (configurable)
+    # --- Resolve store access ---
+    is_store_unrestricted = False
+
     if "PLANNER" in user_roles:
-        # Check if planner has region-level restrictions
         region_access = (
             db.query(UserRegionAccess)
             .filter(UserRegionAccess.user_id == current_user.id, UserRegionAccess.is_active == True)
             .all()
         )
         if not region_access:
-            # No region restriction = full access (HO Planner)
-            return RLSContext(user=current_user, accessible_stores=[], is_unrestricted=True)
+            is_store_unrestricted = True
 
-    # Collect stores from direct store access
     store_codes: Set[str] = set()
+    if not is_store_unrestricted:
+        direct_stores = (
+            db.query(UserStoreAccess.store_code)
+            .filter(UserStoreAccess.user_id == current_user.id, UserStoreAccess.is_active == True)
+            .all()
+        )
+        store_codes.update(s[0] for s in direct_stores)
 
-    direct_stores = (
-        db.query(UserStoreAccess.store_code)
-        .filter(UserStoreAccess.user_id == current_user.id, UserStoreAccess.is_active == True)
-        .all()
-    )
-    store_codes.update(s[0] for s in direct_stores)
+        region_access_records = (
+            db.query(UserRegionAccess)
+            .filter(UserRegionAccess.user_id == current_user.id, UserRegionAccess.is_active == True)
+            .all()
+        )
+        for ra in region_access_records:
+            store_query = db.query(Store.store_code).filter(Store.is_active == True)
+            if ra.region:
+                store_query = store_query.filter(Store.region == ra.region)
+            if ra.hub:
+                store_query = store_query.filter(Store.hub == ra.hub)
+            if ra.division:
+                store_query = store_query.filter(Store.division == ra.division)
+            if ra.business_unit:
+                store_query = store_query.filter(Store.business_unit == ra.business_unit)
+            region_stores = store_query.all()
+            store_codes.update(s[0] for s in region_stores)
 
-    # Collect stores from region access
-    region_access_records = (
-        db.query(UserRegionAccess)
-        .filter(UserRegionAccess.user_id == current_user.id, UserRegionAccess.is_active == True)
-        .all()
-    )
+    # --- Resolve category access ---
+    accessible_categories = []
+    has_category_restrictions = False
 
-    for ra in region_access_records:
-        store_query = db.query(Store.store_code).filter(Store.is_active == True)
-        if ra.region:
-            store_query = store_query.filter(Store.region == ra.region)
-        if ra.hub:
-            store_query = store_query.filter(Store.hub == ra.hub)
-        if ra.division:
-            store_query = store_query.filter(Store.division == ra.division)
-        if ra.business_unit:
-            store_query = store_query.filter(Store.business_unit == ra.business_unit)
+    try:
+        category_records = (
+            db.query(UserCategoryAccess)
+            .filter(UserCategoryAccess.user_id == current_user.id,
+                    UserCategoryAccess.is_active == True)
+            .all()
+        )
+        if category_records:
+            has_category_restrictions = True
+            for cr in category_records:
+                accessible_categories.append({
+                    "division": cr.division,
+                    "sub_division": cr.sub_division,
+                    "major_category": cr.major_category,
+                })
+    except Exception as e:
+        # Table may not exist yet (pre-migration) — graceful fallback
+        logger.warning(f"Category access check failed (table may not exist yet): {e}")
 
-        region_stores = store_query.all()
-        store_codes.update(s[0] for s in region_stores)
-
-    if not store_codes:
+    # Non-admin users need at least some access
+    if not is_store_unrestricted and not store_codes and not accessible_categories:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="No store access configured. Contact admin.",
@@ -226,7 +291,9 @@ async def get_rls_context(
     return RLSContext(
         user=current_user,
         accessible_stores=list(store_codes),
-        is_unrestricted=False,
+        accessible_categories=accessible_categories,
+        is_unrestricted=is_store_unrestricted and not has_category_restrictions,
+        has_category_restrictions=has_category_restrictions,
     )
 
 

@@ -25,7 +25,7 @@ from app.schemas.common import APIResponse
 from app.services.msa_service import MSAService
 from app.services.msa_result_storage import MSAResultStorageService
 from app.services.msa_job_service import create_msa_storage_job, get_job_status, list_jobs
-from app.security.dependencies import get_current_user
+from app.security.dependencies import get_current_user, get_rls_context, RLSContext
 from app.models.rbac import User
 
 router = APIRouter(prefix="/msa", tags=["MSA Stock Calculation"])
@@ -542,12 +542,16 @@ def calculate_msa(
     db: Session = Depends(get_data_db),
     main_db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    rls_context: RLSContext = Depends(get_rls_context),
     request=None  # For session retrieval if needed
 ):
     """
     Calculate MSA allocation from filtered data
     Returns 3 result sets: base analysis, generated colors, color variants
     ALSO: Stores all results to database with sequence tracking and returns sequence_id
+    
+    Category RLS: Results are automatically filtered to the user's assigned
+    major categories. Admins/SuperAdmins see all categories.
     
     Request Body:
         - slocs: List of SLOC codes to include
@@ -567,9 +571,14 @@ def calculate_msa(
         if not body.slocs:
             raise HTTPException(status_code=400, detail="At least one SLOC is required")
         
+        # Get category restrictions from RLS context
+        rls_categories = rls_context.get_category_values() if rls_context.has_category_restrictions else None
+        if rls_categories:
+            logger.info(f"📊 MSA for user {current_user.username} — categories: {rls_categories}")
+        
         logger.info(f"📊 Calculating MSA for SLOCs: {body.slocs}, threshold: {body.threshold}, date: {body.date}")
         
-        data_service = MSAService(db)
+        data_service = MSAService(db, rls_categories=rls_categories)
         
         # Load data with filters to improve performance
         # Use provided date and filters, or load all data if not provided

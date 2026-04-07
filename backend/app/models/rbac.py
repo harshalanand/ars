@@ -87,6 +87,7 @@ class User(Base):
     user_roles = relationship("UserRole", back_populates="user", lazy="selectin")
     store_access = relationship("UserStoreAccess", back_populates="user", lazy="selectin")
     region_access = relationship("UserRegionAccess", back_populates="user", lazy="selectin")
+    category_access = relationship("UserCategoryAccess", back_populates="user", lazy="selectin")
 
     @property
     def roles(self):
