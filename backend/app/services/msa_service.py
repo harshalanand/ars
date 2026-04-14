@@ -12,16 +12,19 @@ from loguru import logger
 class MSAService:
     """Service for MSA stock calculation operations"""
 
-    def __init__(self, db):
+    def __init__(self, db, rls_categories: list = None):
         """
         Initialize MSAService
         
         Args:
             db: SQLAlchemy session (Data DB session)
+            rls_categories: Optional list of MAJ_CAT values the user can access.
+                           If None or empty, no category filter is applied (admin/unrestricted).
         """
         self.db = db
         self.main_table = "VW_ET_MSA_STK_WITH_MASTER"
         self.pending_table = "MASTER_ALC_PEND"
+        self._rls_categories = rls_categories or []
 
     # ========================================================================
     # Data Discovery Methods
@@ -256,9 +259,31 @@ class MSAService:
             else:
                 logger.warning("⚠️ No where clauses built - will return all data")
 
-            # Load data - no row limit
+            # Load data — select only columns needed for calculation (not SELECT *)
+            # This significantly reduces memory usage and network transfer
+            needed_cols = [
+                "ST_CD", "SLOC", "SEG", "MAJ_CAT", "GEN_ART_NUMBER",
+                "CLR", "SZ", "STK_Q", "ARTICLE_NUMBER",
+                "M_VND_NM", "M_VND_CD", "MACRO_MVGR", "MICRO_MVGR",
+                "FAB", "MVGR_MATRIX", "SSN", "DATE",
+                "SUB_DIV", "DIV", "MRP", "RSP",
+            ]
+            
+            # Build column list — only include columns that exist in the view
+            try:
+                # Quick check for available columns
+                sample = pd.read_sql(text(f"SELECT TOP 1 * FROM {self.main_table}"), self.db.bind)
+                available = set(sample.columns)
+                select_cols = [c for c in needed_cols if c in available]
+                # Add any remaining columns that might be needed
+                extra_cols = [c for c in available if c not in select_cols]
+                select_cols.extend(extra_cols)
+                col_list = ", ".join(f"[{c}]" for c in select_cols)
+            except Exception:
+                col_list = "*"
+
             sql = f"""
-            SELECT  *
+            SELECT  {col_list}
             FROM {self.main_table}
             {where_sql}
             """
@@ -401,6 +426,17 @@ class MSAService:
                 logger.info(f"After SEG filter {seg_filter}: {len(msa)} rows")
             else:
                 logger.info(f"No SEG filter applied - keeping ALL {msa['SEG'].nunique()} segments")
+
+            # ============ STEP 4b: CATEGORY RLS FILTER ============
+            # If user has category restrictions, filter to only their assigned MAJ_CATs
+            # This is set by the caller (msa_stock.py endpoint) via rls_categories param
+            if hasattr(self, '_rls_categories') and self._rls_categories:
+                if "MAJ_CAT" in msa.columns:
+                    before = len(msa)
+                    msa = msa[msa["MAJ_CAT"].isin(self._rls_categories)]
+                    logger.info(f"Category RLS filter: {before} → {len(msa)} rows (categories: {self._rls_categories})")
+                else:
+                    logger.warning("MAJ_CAT column not found — category filter skipped")
 
 
             # ============ STEP 5: PIVOT MSA BY SLOC ============

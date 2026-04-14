@@ -108,3 +108,11 @@ api_router.include_router(listing_router)
 
 # Maintenance (superadmin only)
 api_router.include_router(maintenance_router)
+
+# Pipeline (parallel MSA processing — replaces 20 machines)
+from app.api.v1.endpoints.pipeline import router as pipeline_router
+api_router.include_router(pipeline_router)
+
+# Allocation Engine v2 (score-based, replaces Excel 8-level waterfall)
+from app.api.v1.endpoints.allocation_engine import router as alloc_engine_router
+api_router.include_router(alloc_engine_router)

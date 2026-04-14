@@ -25,7 +25,7 @@ system_engine = create_engine(
     max_overflow=settings.DB_MAX_OVERFLOW,
     pool_timeout=settings.DB_POOL_TIMEOUT,
     pool_recycle=settings.DB_POOL_RECYCLE,
-    pool_pre_ping=True,
+    pool_pre_ping=settings.DB_POOL_PRE_PING,
     echo=settings.DEBUG,
     fast_executemany=True,
 )
@@ -44,7 +44,7 @@ data_engine = create_engine(
     max_overflow=settings.DB_MAX_OVERFLOW,
     pool_timeout=settings.DB_POOL_TIMEOUT,
     pool_recycle=settings.DB_POOL_RECYCLE,
-    pool_pre_ping=True,
+    pool_pre_ping=settings.DB_POOL_PRE_PING,
     echo=settings.DEBUG,
     fast_executemany=True,
 )
@@ -137,6 +137,16 @@ def get_system_engine():
 def get_data_engine():
     """Get the Data DB SQLAlchemy engine."""
     return data_engine
+
+
+def get_system_db_url() -> str:
+    """Get the System DB connection URL string (for background tasks)."""
+    return str(settings.DATABASE_URL)
+
+
+def get_data_db_url() -> str:
+    """Get the Data DB connection URL string (for background tasks)."""
+    return str(settings.DATA_DATABASE_URL)
 
 
 # ============================================================================

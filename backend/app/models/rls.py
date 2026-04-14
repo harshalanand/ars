@@ -62,6 +62,39 @@ class UserRegionAccess(Base):
     user = relationship("User", back_populates="region_access")
 
 
+class UserCategoryAccess(Base):
+    """
+    Category-Level RLS: assigns specific Major Categories to each planner.
+    
+    Each planner gets a set of (division, sub_division, major_category)
+    combinations. The MSA calculation, grid builder, allocation engine,
+    and BDC creation all filter by these assignments.
+    
+    When is_exclusive=True, only this user should allocate for this category.
+    Admins/SuperAdmins bypass this entirely.
+    """
+    __tablename__ = "rls_user_category_access"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("rbac_users.id"), nullable=False)
+    division = Column(String(100))
+    sub_division = Column(String(100))
+    major_category = Column(String(100))
+    access_level = Column(String(50), default="FULL")
+    is_exclusive = Column(Boolean, default=True)
+    granted_at = Column(DateTime, default=datetime.utcnow)
+    granted_by = Column(String(100))
+    is_active = Column(Boolean, default=True)
+    notes = Column(String(500))
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "division", "sub_division", "major_category",
+                         name="uq_user_category"),
+    )
+
+    user = relationship("User", back_populates="category_access")
+
+
 class ColumnRestriction(Base):
     __tablename__ = "rls_column_restrictions"
 

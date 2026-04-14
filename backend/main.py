@@ -193,10 +193,14 @@ async def root():
 @app.get("/health", tags=["Health"])
 async def health_check():
     db_ok = check_db_connection()
+    data_db_ok = check_data_db_connection()
+    all_ok = db_ok and data_db_ok
     return {
-        "status": "healthy" if db_ok else "degraded",
-        "database": "connected" if db_ok else "disconnected",
+        "status": "healthy" if all_ok else "degraded",
+        "system_db": "connected" if db_ok else "disconnected",
+        "data_db": "connected" if data_db_ok else "disconnected",
         "version": settings.APP_VERSION,
+        "environment": settings.APP_ENV,
     }
 
 
@@ -212,3 +216,26 @@ if __name__ == "__main__":
         reload=settings.DEBUG,
         workers=1 if settings.DEBUG else 4,
     )
+
+# ============================================================================
+# Static Frontend Serving (production)
+# ============================================================================
+import os
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
+
+static_dir = os.path.join(os.path.dirname(__file__), "static")
+if os.path.exists(static_dir) and os.path.exists(os.path.join(static_dir, "index.html")):
+    # Serve static assets (JS, CSS, images)
+    app.mount("/assets", StaticFiles(directory=os.path.join(static_dir, "assets")), name="static-assets")
+    
+    # Catch-all: serve index.html for SPA routing (must be LAST)
+    @app.get("/{full_path:path}", tags=["Frontend"], include_in_schema=False)
+    async def serve_frontend(full_path: str):
+        # Don't intercept API routes or docs
+        if full_path.startswith(("api/", "docs", "redoc", "openapi", "health")):
+            return
+        file_path = os.path.join(static_dir, full_path)
+        if os.path.exists(file_path) and os.path.isfile(file_path):
+            return FileResponse(file_path)
+        return FileResponse(os.path.join(static_dir, "index.html"))
