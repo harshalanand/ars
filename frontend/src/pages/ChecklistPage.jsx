@@ -12,16 +12,7 @@ import {
   ChevronUp, ChevronDown, X, Database, Eye, CircleCheck,
   FolderOpen, ChevronRight
 } from 'lucide-react'
-
-const C = {
-  cardBg:'#fff', cardBorder:'#e2e8f0', headerBg:'#f8fafc', rowAlt:'#fafbfc',
-  inputBorder:'#cbd5e1',
-  text:'#0f172a', textSub:'#475569', textMuted:'#94a3b8', codeColor:'#1e293b',
-  primary:'#4f46e5', primaryLight:'#eef2ff', primaryBd:'#c7d2fe',
-  green:'#059669', greenBg:'#ecfdf5', greenBd:'#a7f3d0',
-  red:'#dc2626', redBg:'#fef2f2', redBd:'#fecaca',
-  amber:'#d97706', amberBg:'#fffbeb', amberBd:'#fde68a',
-}
+import { C } from '@/theme/colors'
 
 /* Group colour palette — cycles for different groups */
 const GROUP_COLORS = [

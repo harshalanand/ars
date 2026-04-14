@@ -315,7 +315,11 @@ def _run_upload_job(job_id: str, metadata: dict):
             job.sample_changes = json.dumps(result['sample_changes'][:100])  # First 100 changes
         
         if result.get('error_details'):
-            job.error_details = json.dumps(result['error_details'][:20])  # Limit to 20 errors
+            job.error_details = json.dumps(result['error_details'][:100])  # Limit to 100 errors
+
+        # Store row-level validation errors (type mismatches with row/column detail)
+        if result.get('validation_errors'):
+            job.validation_errors = json.dumps(result['validation_errors'][:200])
         
         db.commit()
         
@@ -360,16 +364,25 @@ def _run_upload_job(job_id: str, metadata: dict):
 def _run_upsert(db: Session, job: UploadJob, df: pd.DataFrame, pk_columns: List[str], progress_callback=None) -> dict:
     """Execute upsert operation."""
     engine = UpsertEngine(db)
-    
+
+    # Pre-validate data types — gives users row-level error details
+    validation_errors = engine.validate_data_types(
+        table_name=job.table_name,
+        df=df,
+        max_errors=200,
+    )
+    if validation_errors:
+        logger.warning(f"[{job.job_id}] {len(validation_errors)} type validation errors detected")
+
     # For large uploads (>50k rows), skip detailed row-level audit collection
     # as it's too slow. Summary audit is always logged.
     # Sample changes (first 100) are always collected for validation.
     total_rows = len(df)
     enable_detailed_audit = total_rows <= 50000
-    
+
     if not enable_detailed_audit:
         logger.info(f"[{job.job_id}] Large upload ({total_rows} rows) - collecting sample changes only")
-    
+
     result = engine.upsert(
         table_name=job.table_name,
         df=df,
@@ -383,6 +396,11 @@ def _run_upsert(db: Session, job: UploadJob, df: pd.DataFrame, pk_columns: List[
         progress_callback=progress_callback,
         collect_sample_changes=True,  # Always collect sample for validation
     )
+
+    # Attach validation errors to result
+    if validation_errors:
+        result["validation_errors"] = validation_errors
+
     return result
 
 
@@ -466,6 +484,7 @@ def get_job_status(db: Session, job_id: str) -> Optional[dict]:
         'error_rows': job.error_rows,
         'error_message': job.error_message,
         'error_details': json.loads(job.error_details) if job.error_details else None,
+        'validation_errors': json.loads(job.validation_errors) if job.validation_errors else None,
         'changed_columns_summary': json.loads(job.changed_columns_summary) if job.changed_columns_summary else None,
         'sample_changes': json.loads(job.sample_changes) if job.sample_changes else None,
         'created_by': job.created_by,

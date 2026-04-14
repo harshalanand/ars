@@ -9,16 +9,7 @@ import {
   Eye, AlertTriangle, CheckCircle2,
   Search, Loader2, UploadCloud
 } from 'lucide-react'
-
-const C = {
-  cardBg:'#fff', cardBorder:'#e2e8f0', headerBg:'#f8fafc', rowAlt:'#fafbfc',
-  inputBorder:'#cbd5e1',
-  text:'#0f172a', textSub:'#475569', textMuted:'#94a3b8',
-  primary:'#4f46e5', primaryLight:'#eef2ff', primaryBd:'#c7d2fe',
-  green:'#059669', greenBg:'#ecfdf5', greenBd:'#a7f3d0',
-  red:'#dc2626', redBg:'#fef2f2', redBd:'#fecaca',
-  amber:'#d97706', amberBg:'#fffbeb', amberBd:'#fde68a',
-}
+import { C } from '@/theme/colors'
 const sInput = { height:28, fontSize:11, padding:'0 8px', borderRadius:5, border:`1px solid ${C.inputBorder}`, outline:'none', color:C.text, background:'#fff' }
 const sSelect = { ...sInput, paddingRight:20, cursor:'pointer' }
 const sBtn = (bg,color,bd) => ({ display:'inline-flex', alignItems:'center', gap:4, height:28, padding:'0 10px', fontSize:11, fontWeight:600, borderRadius:5, border:`1px solid ${bd||bg}`, background:bg, color, cursor:'pointer', whiteSpace:'nowrap' })

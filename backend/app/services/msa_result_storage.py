@@ -74,6 +74,66 @@ class MSAResultStorageService:
         except Exception as e:
             logger.warning(f"Could not auto-create ARS tables: {e}")
 
+    def fix_column_types(self, table_name: str, data: List[Dict] = None) -> int:
+        """Fix existing VARCHAR(MAX) columns to proper types (FLOAT for numeric, NVARCHAR for text).
+        Call this before inserting new data to ensure correct types."""
+        db_table = self.result_tables.get(table_name)
+        if not db_table:
+            return 0
+        tbl = db_table.split('.')[-1]
+        fixed = 0
+        try:
+            connection = self.db.connection().connection
+            cursor = connection.cursor()
+            try:
+                # Get all VARCHAR(MAX) columns
+                cursor.execute(f"""
+                    SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+                    WHERE TABLE_NAME = '{tbl}' AND DATA_TYPE = 'varchar'
+                    AND CHARACTER_MAXIMUM_LENGTH = -1
+                    AND COLUMN_NAME NOT IN ('id', 'sequence_id')
+                """)
+                varchar_cols = [r[0] for r in cursor.fetchall()]
+                if not varchar_cols:
+                    return 0
+
+                for col in varchar_cols:
+                    new_type = self._infer_sql_type(col, data or [])
+                    if new_type == "FLOAT":
+                        # Convert: update NULLs/blanks to NULL, then ALTER
+                        try:
+                            cursor.execute(f"""
+                                UPDATE {db_table}
+                                SET [{col}] = NULL
+                                WHERE [{col}] = '' OR [{col}] IS NULL
+                            """)
+                            cursor.execute(f"""
+                                ALTER TABLE {db_table}
+                                ALTER COLUMN [{col}] FLOAT NULL
+                            """)
+                            fixed += 1
+                            logger.info(f"Fixed {tbl}.{col}: VARCHAR(MAX) -> FLOAT")
+                        except Exception as e:
+                            logger.warning(f"Could not convert {tbl}.{col} to FLOAT: {e}")
+                    else:
+                        try:
+                            cursor.execute(f"""
+                                ALTER TABLE {db_table}
+                                ALTER COLUMN [{col}] NVARCHAR(200) NULL
+                            """)
+                            fixed += 1
+                            logger.info(f"Fixed {tbl}.{col}: VARCHAR(MAX) -> NVARCHAR(200)")
+                        except Exception as e:
+                            logger.warning(f"Could not convert {tbl}.{col} to NVARCHAR: {e}")
+
+                connection.commit()
+                logger.info(f"Fixed {fixed}/{len(varchar_cols)} columns in {tbl}")
+            finally:
+                cursor.close()
+        except Exception as e:
+            logger.error(f"Error fixing column types: {e}")
+        return fixed
+
     # ========================================================================
     # Sequence Management
     # ========================================================================
@@ -175,12 +235,11 @@ class MSAResultStorageService:
             except Exception as e:
                 try:
                     connection.rollback()
-                except:
+                except Exception:
                     pass
                 raise
             finally:
                 cursor.close()
-                # Don't close connection - SQLAlchemy manages it
                 
         except Exception as e:
             logger.error(f"❌ Error creating sequence record: {e}")
@@ -223,105 +282,154 @@ class MSAResultStorageService:
             logger.warning(f"Error getting existing columns for {table_name}: {e}")
             return ['id', 'sequence_id']
 
+    # ── Column type mapping: actual SQL types per column name ──────────
+    # BIGINT: numeric identifiers (article numbers, material numbers)
+    # NVARCHAR: text codes and descriptions
+    # FLOAT: quantities, stock values, percentages
+    _KNOWN_TYPES = {
+        # Numeric IDs → BIGINT
+        "ARTICLE_NUMBER": "BIGINT", "MATNR": "BIGINT",
+        "GEN_ART_NUMBER": "BIGINT",
+        # Text codes → NVARCHAR
+        "RDC": "NVARCHAR(50)", "ST_CD": "NVARCHAR(50)",
+        "WERKS": "NVARCHAR(50)", "SLOC": "NVARCHAR(50)",
+        "MAJ_CAT": "NVARCHAR(100)", "CLR": "NVARCHAR(100)",
+        "DIV": "NVARCHAR(100)", "SZ": "NVARCHAR(50)",
+        "FAB": "NVARCHAR(100)", "RNG_SEG": "NVARCHAR(100)",
+        "MACRO_MVGR": "NVARCHAR(100)", "MICRO_MVGR": "NVARCHAR(100)",
+        "VND_CD": "NVARCHAR(100)", "M_VND_CD": "NVARCHAR(100)",
+        "ARTICLE_DESC": "NVARCHAR(500)", "GEN_ART_DESC": "NVARCHAR(500)",
+    }
+
+    @staticmethod
+    def _infer_sql_type(col_name: str, data: List[Dict]) -> str:
+        """Infer SQL type from column name and actual data values."""
+        upper = col_name.upper()
+
+        # 1. Check known types first
+        if upper in MSAResultStorageService._KNOWN_TYPES:
+            return MSAResultStorageService._KNOWN_TYPES[upper]
+
+        # 2. Sample up to 50 non-null values to detect numeric vs text
+        sample = []
+        for row in data:
+            v = row.get(col_name)
+            if v is not None:
+                sample.append(v)
+                if len(sample) >= 50:
+                    break
+
+        if not sample:
+            return "NVARCHAR(200)"
+
+        all_numeric = True
+        has_decimal = False
+        for v in sample:
+            if isinstance(v, float):
+                has_decimal = True
+                continue
+            if isinstance(v, int):
+                continue
+            try:
+                fv = float(v)
+                if '.' in str(v):
+                    has_decimal = True
+            except (ValueError, TypeError):
+                all_numeric = False
+                break
+
+        if all_numeric:
+            return "FLOAT"
+        return "NVARCHAR(200)"
+
     def get_new_columns(self, table_name: str, data: List[Dict]) -> List[str]:
         """
         Identify new columns in the data that don't exist in the table
-        
+
         Args:
             table_name: Table name (msa, msa_gen_clr, msa_gen_clr_var)
             data: List of dictionaries with result data
-        
+
         Returns:
             List of new column names
         """
         if not data:
             return []
-        
+
         existing = set(self.get_existing_columns(table_name))
         data_columns = set(data[0].keys()) if data else set()
         reserved_columns = {'id', 'sequence_id'}
-        
+
         new_columns = list(data_columns - existing - reserved_columns)
-        
+
         if new_columns:
             logger.info(f"New columns detected in {table_name}: {new_columns}")
-        
+
         return new_columns
 
-    def create_columns(self, table_name: str, new_columns: List[str], sequence_id: int) -> None:
+    def create_columns(self, table_name: str, new_columns: List[str], sequence_id: int,
+                       data: List[Dict] = None) -> None:
         """
-        Create new columns in the result table and record them in definitions
-        
-        Args:
-            table_name: Table name (msa, msa_gen_clr, msa_gen_clr_var)
-            new_columns: List of new column names to create
-            sequence_id: Sequence ID for this calculation
+        Create new columns in the result table with proper data types.
+        Infers FLOAT for numeric data, NVARCHAR(200) for text.
         """
         if not new_columns:
             return
-        
+
         try:
             db_table = self.result_tables.get(table_name)
             if not db_table:
                 logger.error(f"Unknown table name: {table_name}")
                 return
-            
-            # Use raw connection to avoid transaction conflicts
+
             connection = self.db.connection().connection
             cursor = connection.cursor()
-            
+
             try:
-                # Create new columns
+                tbl_name_short = db_table.split('.')[-1]
+                # Batch-fetch existing columns once instead of N queries
+                cursor.execute(
+                    "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
+                    "WHERE TABLE_NAME = ?", (tbl_name_short,)
+                )
+                existing_set = {r[0] for r in cursor.fetchall()}
+
                 for col_name in new_columns:
                     try:
-                        # Check if column already exists
-                        check_sql = f"""
-                        SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS 
-                        WHERE TABLE_NAME = '{db_table.split('.')[-1]}' 
-                        AND COLUMN_NAME = '{col_name}'
-                        """
-                        cursor.execute(check_sql)
-                        exists = cursor.fetchone() is not None
-                        
-                        if not exists:
-                            alter_sql = f"""
-                            ALTER TABLE {db_table}
-                            ADD [{col_name}] VARCHAR(MAX) NULL
-                            """
-                            cursor.execute(alter_sql)
-                            logger.info(f"✅ Created column {db_table}.{col_name}")
-                        
+                        sql_type = self._infer_sql_type(col_name, data or [])
+
+                        if col_name not in existing_set:
+                            cursor.execute(f"ALTER TABLE {db_table} ADD [{col_name}] {sql_type} NULL")
+                            logger.info(f"Created column {db_table}.{col_name} ({sql_type})")
+
                         # Record in column definitions
-                        insert_col_def_sql = f"""
-                        INSERT INTO {self.column_definitions_table}
-                        (table_name, column_name, column_type, first_sequence_id)
-                        VALUES ('{table_name}', '{col_name}', 'VARCHAR(MAX)', {sequence_id})
-                        """
                         try:
-                            cursor.execute(insert_col_def_sql)
-                        except:
-                            # Might already exist, ignore
-                            pass
-                            
+                            cursor.execute(
+                                f"INSERT INTO {self.column_definitions_table} "
+                                f"(table_name, column_name, column_type, first_sequence_id) "
+                                f"VALUES (?, ?, ?, ?)",
+                                (table_name, col_name, sql_type, sequence_id)
+                            )
+                        except Exception:
+                            pass  # duplicate col def entry is fine
+
                     except Exception as col_err:
                         logger.warning(f"Could not create column {col_name}: {col_err}")
-                
-                # Commit all column changes
+
                 connection.commit()
-                logger.info(f"✅ All columns created for {table_name}")
-                
+                logger.info(f"All columns created for {table_name}")
+
             except Exception as e:
                 try:
                     connection.rollback()
-                except:
+                except Exception:
                     pass
                 raise
             finally:
                 cursor.close()
-                # Don't close connection - SQLAlchemy manages it
 
         except Exception as e:
-            logger.error(f"❌ Error in create_columns: {e}")
+            logger.error(f"Error in create_columns: {e}")
             raise
 
     # ========================================================================
@@ -428,30 +536,59 @@ class MSAResultStorageService:
             if not db_table:
                 raise ValueError(f"Unknown table name: {table_name}")
 
-            # Detect new columns
+            # Fix existing VARCHAR(MAX) columns to proper types
+            self.fix_column_types(table_name, data)
+
+            # Detect new columns and create with proper types
             new_columns = self.get_new_columns(table_name, data)
             if new_columns:
                 logger.info(f"Creating {len(new_columns)} new columns in {table_name}")
-                self.create_columns(table_name, new_columns, sequence_id)
+                self.create_columns(table_name, new_columns, sequence_id, data=data)
 
             existing_columns = self.get_existing_columns(table_name)
+
+            # Build case-insensitive data key map (DB col name → data key) — single pass
+            sample_keys = set(data[0].keys()) if data else set()
+            data_keys_lower = {k.lower(): k for k in sample_keys}
+            key_map = {
+                col: (col if col in sample_keys else data_keys_lower.get(col.lower()))
+                for col in existing_columns
+                if col not in ('id', 'sequence_id')
+            }
+            # Remove unmatched entries
+            key_map = {col: dk for col, dk in key_map.items() if dk is not None}
+
+            logger.info(f"Column mapping: {len(key_map)}/{len(existing_columns)-2} matched, "
+                        f"data keys: {list(sample_keys)[:8]}")
 
             # Prepare rows
             rows_to_insert = []
             for row in data:
                 insert_row = {'sequence_id': sequence_id}
-
                 for col in existing_columns:
                     if col in ['id', 'sequence_id']:
                         continue
-
-                    insert_row[col] = row.get(col)
-
+                    data_key = key_map.get(col)
+                    insert_row[col] = row.get(data_key) if data_key else None
                 rows_to_insert.append(insert_row)
 
-            # Raw connection
+            # Single raw connection for TRUNCATE + INSERT
             connection = self.db.connection().connection
             cursor = connection.cursor()
+
+            # Clear old data first (same connection as insert)
+            try:
+                cursor.execute(f"TRUNCATE TABLE {db_table}")
+                connection.commit()
+                logger.info(f"Truncated {db_table}")
+            except Exception:
+                try:
+                    connection.rollback()
+                    cursor.execute(f"DELETE FROM {db_table}")
+                    connection.commit()
+                    logger.info(f"Deleted all from {db_table}")
+                except Exception as e2:
+                    logger.error(f"Could not clear {db_table}: {e2}")
 
             try:
                 # IMPORTANT: enable fast executemany

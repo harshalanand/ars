@@ -13,5 +13,22 @@ export default defineConfig({
       '/api': { target: 'http://localhost:8000', changeOrigin: true }
     },
     allowedHosts: ['ars.v2retail.net']
-  }
+  },
+  build: {
+    target: 'es2020',
+    chunkSizeWarningLimit: 600,
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          'vendor-react': ['react', 'react-dom', 'react-router-dom'],
+          'vendor-grid': ['ag-grid-community', 'ag-grid-react'],
+          'vendor-utils': ['axios', 'zustand', 'react-hot-toast', 'date-fns'],
+          'vendor-charts': ['recharts'],
+        },
+      },
+    },
+  },
+  optimizeDeps: {
+    include: ['react', 'react-dom', 'axios', 'zustand'],
+  },
 })

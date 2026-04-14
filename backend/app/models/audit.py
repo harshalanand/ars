@@ -107,6 +107,7 @@ class UploadJob(Base):
     duration_ms = Column(Integer)
     changed_columns_summary = Column(Text)  # JSON: which columns were changed
     sample_changes = Column(Text)  # JSON: first 100 row changes for validation
+    validation_errors = Column(Text)  # JSON: row-level type mismatch details [{row, column, value, expected}]
 
 
 class DataChangeLog(Base):

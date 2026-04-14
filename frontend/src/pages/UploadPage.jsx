@@ -217,6 +217,7 @@ export default function UploadPage() {
                 duration_ms: job.duration_ms,
                 error_details: job.error_details,
                 error_message: job.error_message,
+                validation_errors: job.validation_errors,
               })
               setStep(4)
             }
@@ -865,6 +866,59 @@ export default function UploadPage() {
                       {typeof err === 'string' ? err : `Chunk ${err.chunk} (rows ${err.rows}): ${err.error}`}
                     </div>
                   ))}
+                </div>
+              </div>
+            )}
+
+            {/* Validation Errors — Row-level type mismatch details */}
+            {result.validation_errors && result.validation_errors.length > 0 && (
+              <div className="mt-4 p-3 bg-amber-50 rounded border border-amber-200 text-left">
+                <div className="flex items-center justify-between mb-2">
+                  <div className="text-sm font-medium text-amber-800">
+                    Data Type Warnings ({result.validation_errors.length} issues found — fix these in your file and re-upload)
+                  </div>
+                  <button
+                    onClick={() => {
+                      const rows = result.validation_errors
+                      const csv = 'Row,Column,Value,Expected Type,Target Type\n' +
+                        rows.map(e => `${e.row},"${(e.column||'').replace(/"/g,'""')}","${(e.value||'').replace(/"/g,'""')}","${e.expected}","${e.target_type}"`).join('\n')
+                      const blob = new Blob([csv], { type: 'text/csv' })
+                      const url = URL.createObjectURL(blob)
+                      const a = document.createElement('a')
+                      a.href = url; a.download = 'validation_errors.csv'; a.click()
+                      URL.revokeObjectURL(url)
+                    }}
+                    className="text-xs px-2 py-1 bg-amber-100 hover:bg-amber-200 text-amber-800 rounded border border-amber-300"
+                  >
+                    Download CSV
+                  </button>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="text-xs w-full border-collapse">
+                    <thead>
+                      <tr className="bg-amber-100 text-amber-900">
+                        <th className="px-2 py-1 border border-amber-200 text-left">Row</th>
+                        <th className="px-2 py-1 border border-amber-200 text-left">Column</th>
+                        <th className="px-2 py-1 border border-amber-200 text-left">Your Value</th>
+                        <th className="px-2 py-1 border border-amber-200 text-left">Expected</th>
+                      </tr>
+                    </thead>
+                    <tbody className="max-h-48 overflow-y-auto">
+                      {result.validation_errors.slice(0, 50).map((err, i) => (
+                        <tr key={i} className={i % 2 ? 'bg-amber-50/50' : ''}>
+                          <td className="px-2 py-1 border border-amber-200 font-mono">{err.row}</td>
+                          <td className="px-2 py-1 border border-amber-200 font-semibold">{err.column}</td>
+                          <td className="px-2 py-1 border border-amber-200 font-mono text-red-700">{err.value}</td>
+                          <td className="px-2 py-1 border border-amber-200">{err.expected}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  {result.validation_errors.length > 50 && (
+                    <div className="text-xs text-amber-600 mt-1">
+                      Showing first 50 of {result.validation_errors.length} issues. Download CSV for full list.
+                    </div>
+                  )}
                 </div>
               </div>
             )}

@@ -1032,6 +1032,96 @@ class UpsertEngine:
         }
 
 
+    # ========================================================================
+    # PRE-VALIDATION: Detect type mismatches BEFORE upsert
+    # ========================================================================
+
+    def validate_data_types(
+        self,
+        table_name: str,
+        df: pd.DataFrame,
+        max_errors: int = 200,
+    ) -> List[Dict[str, Any]]:
+        """
+        Validate data against target column types BEFORE upsert using fast
+        vectorized pandas operations (NOT iterrows — that's 100x slower).
+
+        Returns list of row-level errors with row number, column, expected type,
+        and actual value — so users can fix their file and re-upload.
+        """
+        target_columns = self._get_table_columns(table_name)
+        if not target_columns or df.empty:
+            return []
+
+        validation_errors = []
+
+        for col_name in df.columns:
+            if col_name not in target_columns or len(validation_errors) >= max_errors:
+                break
+
+            sql_type = target_columns[col_name].upper()
+            series = df[col_name]
+
+            # Skip columns that don't need numeric/date validation
+            if sql_type.startswith(("NVARCHAR", "VARCHAR", "NCHAR", "CHAR", "NTEXT", "TEXT")):
+                # Only check string length for bounded types
+                try:
+                    length_str = target_columns[col_name].split("(")[1].split(")")[0]
+                    if length_str.upper() == "MAX":
+                        continue
+                    max_len = int(length_str)
+                except Exception:
+                    continue
+                # Vectorized length check
+                mask = series.notna() & ~series.isin(["__SKIP__", "__NULL__", ""])
+                if mask.any():
+                    str_lens = series[mask].astype(str).str.len()
+                    bad = str_lens[str_lens > max_len]
+                    for idx in bad.index[:max(0, max_errors - len(validation_errors))]:
+                        validation_errors.append({
+                            "row": idx + 2,
+                            "column": col_name,
+                            "value": str(series[idx])[:100],
+                            "expected": f"text (max {max_len} chars)",
+                            "target_type": target_columns[col_name],
+                        })
+                continue
+
+            if sql_type.startswith(("INT", "BIGINT", "SMALLINT", "TINYINT",
+                                    "FLOAT", "REAL", "DECIMAL", "NUMERIC")):
+                expected = "integer" if sql_type.startswith(("INT", "BIGINT", "SMALLINT", "TINYINT")) else "decimal number"
+                mask = series.notna() & ~series.isin(["__SKIP__", "__NULL__", ""])
+                if not mask.any():
+                    continue
+                numeric = pd.to_numeric(series[mask], errors='coerce')
+                bad = numeric[numeric.isna() & mask[mask].index.isin(numeric.index)]
+                for idx in bad.index[:max(0, max_errors - len(validation_errors))]:
+                    validation_errors.append({
+                        "row": idx + 2,
+                        "column": col_name,
+                        "value": str(series[idx])[:100],
+                        "expected": expected,
+                        "target_type": target_columns[col_name],
+                    })
+
+            elif sql_type.startswith(("DATE", "DATETIME")):
+                mask = series.notna() & ~series.isin(["__SKIP__", "__NULL__", ""])
+                if not mask.any():
+                    continue
+                dates = pd.to_datetime(series[mask], errors='coerce')
+                bad = dates[dates.isna()]
+                for idx in bad.index[:max(0, max_errors - len(validation_errors))]:
+                    validation_errors.append({
+                        "row": idx + 2,
+                        "column": col_name,
+                        "value": str(series[idx])[:100],
+                        "expected": "date/datetime",
+                        "target_type": target_columns[col_name],
+                    })
+
+        return validation_errors
+
+
 # ============================================================================
 # Direct Single/Small-Batch Update (for inline grid edits)
 # ============================================================================

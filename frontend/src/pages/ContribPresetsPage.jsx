@@ -5,14 +5,7 @@ import { useState, useEffect, useCallback, useMemo } from 'react'
 import { contribAPI } from '@/services/api'
 import toast from 'react-hot-toast'
 import { Settings, Trash2, Save, RefreshCw, ChevronUp, ChevronDown } from 'lucide-react'
-
-const C = {
-  cardBg:'#fff', cardBorder:'#e2e8f0', headerBg:'#f8fafc',
-  text:'#0f172a', textSub:'#475569', textMuted:'#94a3b8',
-  primary:'#4f46e5', primaryLight:'#eef2ff', primaryBd:'#c7d2fe',
-  red:'#dc2626',
-  inputBg:'#fff', inputBorder:'#cbd5e1',
-}
+import { C } from '@/theme/colors'
 
 // Fast normalize: just grab first 10 chars (YYYY-MM-DD)
 const normMonth = (m) => String(m).substring(0, 10)

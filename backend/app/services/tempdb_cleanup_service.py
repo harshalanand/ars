@@ -208,22 +208,44 @@ class TempDBCleanupService:
                     logger.warning(f"TempDB cleanup: failed to drop [{tbl_name}]: {exc}")
 
             # 3. Shrink (always attempt — TRUNCATEONLY is a no-op if nothing to free)
+            # DBCC SHRINKFILE requires:
+            #   a) autocommit mode (cannot run inside a user transaction)
+            #   b) tempdb as the current database context
+            # So we use a separate pyodbc connection with autocommit + USE tempdb.
             if self._shrink and not dry_run:
+                shrink_fairy = None
                 try:
                     cursor.execute(_TEMPDB_FILES_SQL)
                     file_names = [r[0] for r in cursor.fetchall()]
+
+                    shrink_fairy = engine.raw_connection()
+                    pyodbc_conn = shrink_fairy.driver_connection
+                    pyodbc_conn.autocommit = True
+                    shrink_cursor = pyodbc_conn.cursor()
+                    shrink_cursor.execute("USE tempdb")
+
                     for fname in file_names:
                         try:
-                            cursor.execute(
+                            shrink_cursor.execute(
                                 f"DBCC SHRINKFILE ([{fname}], TRUNCATEONLY) WITH NO_INFOMSGS"
                             )
-                            raw_conn.commit()
                             shrunk.append(fname)
                         except Exception as exc:
                             errors.append({"file": fname, "error": str(exc)})
                             logger.warning(f"TempDB shrink [{fname}] failed: {exc}")
+
+                    shrink_cursor.close()
                 except Exception as exc:
                     logger.warning(f"TempDB shrink file enumeration failed: {exc}")
+                finally:
+                    # CRITICAL: invalidate this connection so it is NOT returned
+                    # to the pool with "USE tempdb" context — that would poison
+                    # other queries into looking for tables in tempdb instead of Rep_data.
+                    if shrink_fairy:
+                        try:
+                            shrink_fairy.invalidate()
+                        except Exception:
+                            pass
 
             # 4. Size after
             try:

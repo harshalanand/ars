@@ -13,17 +13,7 @@ import {
   FileSpreadsheet, ChevronDown, ChevronRight, AlertTriangle, CheckCircle2,
   X, Database, Columns, Search, Filter, Loader2, Edit3, UploadCloud
 } from 'lucide-react'
-
-/* ── colour tokens ─────────────────────────────────────────────────────────── */
-const C = {
-  cardBg:'#fff', cardBorder:'#e2e8f0', headerBg:'#f8fafc', rowAlt:'#fafbfc',
-  inputBorder:'#cbd5e1',
-  text:'#0f172a', textSub:'#475569', textMuted:'#94a3b8', codeColor:'#1e293b',
-  primary:'#4f46e5', primaryLight:'#eef2ff', primaryBd:'#c7d2fe',
-  green:'#059669', greenBg:'#ecfdf5', greenBd:'#a7f3d0',
-  red:'#dc2626', redBg:'#fef2f2', redBd:'#fecaca',
-  amber:'#d97706', amberBg:'#fffbeb', amberBd:'#fde68a',
-}
+import { C } from '@/theme/colors'
 
 /* ── tiny icon button ──────────────────────────────────────────────────────── */
 const IBtn = ({icon:Icon,title,onClick,color,bg,bd,disabled,size=24,iconSize=11}) => (

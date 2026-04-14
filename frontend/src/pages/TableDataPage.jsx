@@ -79,44 +79,52 @@ export default function TableDataPage() {
     if (!schema?.columns) return []
     const isNumType = (t) => ['int','bigint','smallint','tinyint','float','real','decimal','numeric','money'].includes((t||'').toLowerCase())
     const isTextType = (t) => ['nvarchar','varchar','nchar','char','ntext','text'].includes((t||'').toLowerCase())
-    const totalCols = schema.columns.filter(c => !HIDDEN_COLS.has((c.column_name||'').toUpperCase())).length
+    const isDateType = (t) => ['date','datetime','datetime2','smalldatetime','time'].includes((t||'').toLowerCase())
 
     return schema.columns.filter(col => !HIDDEN_COLS.has((col.column_name || '').toUpperCase())).map(col => {
       const dt = col.data_type || ''
       const isNum = isNumType(dt)
       const isText = isTextType(dt)
+      const isDate = isDateType(dt)
+      const header = col.display_name || col.column_name || ''
+      // Width = enough for the header text (avg 7.5px/char + 28px for sort+filter icons + padding)
+      // floored to a per-type minimum so 1-char numeric headers like "0001" still get a usable width.
+      const headerW = Math.ceil(header.length * 7.5) + 30
+      const baseMin = isNum ? 75 : isDate ? 110 : isText ? 120 : 90
+      const width = Math.max(headerW, baseMin)
       return {
         field: col.column_name,
-        headerName: col.display_name || col.column_name,
+        headerName: header,
         sortable: true,
         filter: true,
         resizable: true,
         editable: hasPermission('DATA_EDIT') && !col.is_primary_key,
         cellClass: col.is_primary_key ? 'ag-cell-pk' : '',
-        width: totalCols > 15 ? (isNum ? 65 : isText ? 100 : 80) : undefined,
-        minWidth: isNum ? 55 : 70,
+        width,
+        minWidth: 70,
       }
     })
   }, [schema, hasPermission])
 
-  const colCount = schema?.columns?.length || 0
-
   const defaultColDef = useMemo(() => ({
-    flex: colCount > 10 ? 0 : 1,
-    minWidth: colCount > 15 ? 60 : colCount > 10 ? 75 : 100,
-    width: colCount > 15 ? 80 : colCount > 10 ? 90 : undefined,
     filter: 'agTextColumnFilter',
     floatingFilter: true,
     resizable: true,
     enableCellChangeFlash: true,
+    suppressSizeToFit: false,
     valueFormatter: (p) => {
       if (p.value == null || p.value === '') return ''
       const n = Number(p.value)
       if (isNaN(n)) return p.value
-      if (Number.isInteger(n)) return String(n)
-      return n.toFixed(4)
+      const col = (p.colDef?.field || '').toUpperCase()
+      // CONT columns → 4 decimals
+      if (col.includes('CONT')) return n.toFixed(4)
+      // SALE columns → 2 decimals
+      if (col.includes('SAL') || col.includes('SALE')) return n.toFixed(2)
+      // Everything else → integer
+      return String(Math.round(n))
     },
-  }), [colCount])
+  }), [])
 
   const onCellValueChanged = useCallback(async (params) => {
     const pkCols = schema?.columns?.filter(c => c.is_primary_key).map(c => c.column_name) || []
@@ -370,7 +378,7 @@ export default function TableDataPage() {
         </div>
       </div>
 
-      <div ref={gridWrapRef} className="ag-theme-alpine" style={{ width: '100%', height: 'calc(100vh - 200px)' }}>
+      <div ref={gridWrapRef} className="ag-theme-alpine ag-compact" style={{ width: '100%', height: 'calc(100vh - 170px)' }}>
         <AgGridReact
           ref={gridRef}
           rowData={rowData}
@@ -381,6 +389,9 @@ export default function TableDataPage() {
           undoRedoCellEditing
           ensureDomOrder
           pagination={false}
+          rowHeight={22}
+          headerHeight={26}
+          floatingFiltersHeight={24}
           rowSelection={{ mode: 'multiRow', enableClickSelection: false }}
           onCellFocused={(e) => {
             // Skip if mouse drag is active (mouse handlers manage selection)

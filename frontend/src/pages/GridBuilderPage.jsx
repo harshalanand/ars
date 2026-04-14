@@ -11,27 +11,7 @@ import {
   CheckCircle2, XCircle, Clock, AlertTriangle, Loader,
   LayoutGrid, ChevronDown, ChevronUp, RefreshCw, Database
 } from 'lucide-react'
-
-/* ── colour tokens (light theme) ─────────────────────────────────────────── */
-const C = {
-  text:       '#0f172a',
-  textSub:    '#475569',
-  textMuted:  '#94a3b8',
-  card:       '#ffffff',
-  cardBorder: '#e2e8f0',
-  headerBg:   '#f8fafc',
-  rowAlt:     '#f8fafc',
-  inputBg:    '#ffffff',
-  inputBd:    '#cbd5e1',
-  primary:    '#4f46e5',
-  primaryLt:  '#eef2ff',
-  primaryBd:  '#c7d2fe',
-  green:      '#059669', greenBg: '#ecfdf5', greenBd: '#a7f3d0',
-  red:        '#dc2626', redBg:   '#fef2f2', redBd:   '#fecaca',
-  amber:      '#d97706', amberBg: '#fffbeb', amberBd: '#fde68a',
-  blue:       '#2563eb', blueBg:  '#eff6ff', blueBd:  '#bfdbfe',
-  gray:       '#64748b', grayBg:  '#f1f5f9', grayBd:  '#e2e8f0',
-}
+import { C } from '@/theme/colors'
 
 /* ── tiny helpers ─────────────────────────────────────────────────────────── */
 const StatusBadge = ({ s }) => {
@@ -159,13 +139,25 @@ const ColPicker = ({ available, selected, onChange }) => {
 }
 
 /* ── Create / Edit Modal ──────────────────────────────────────────────────── */
-const EMPTY_FORM = { grid_name:'', description:'', hierarchy_columns:[], kpi_filter:'', output_table:'', status:'Active', pivot_only:false }
+const EMPTY_FORM = { grid_name:'', description:'', hierarchy_columns:[], kpi_filter:'', output_table:'', status:'Active', pivot_only:false, weightage:1.0, grid_group:'Primary', use_for_opt_sale:false }
 
-const GridModal = ({ open, onClose, onSave, availableCols, editing }) => {
+const GridModal = ({ open, onClose, onSave, availableCols, editing, allGrids = [] }) => {
   const [form, setForm] = useState(EMPTY_FORM)
 
+  // Find the grid (if any, besides the one being edited) that already owns use_for_opt_sale
+  const existingOptSaleGrid = allGrids.find(g =>
+    !!g.use_for_opt_sale && (!editing || g.id !== editing.id)
+  )
+  const optSaleLocked = !!existingOptSaleGrid && !form.use_for_opt_sale
+
   useEffect(() => {
-    if (editing) setForm({ ...editing, hierarchy_columns: editing.hierarchy_columns || [] })
+    if (editing) setForm({
+      ...editing,
+      hierarchy_columns: editing.hierarchy_columns || [],
+      weightage:  editing.weightage  ?? 1.0,         // null/undefined → 1.0
+      grid_group: editing.grid_group || 'Primary',   // null/empty → 'Primary'
+      use_for_opt_sale: !!editing.use_for_opt_sale,
+    })
     else setForm(EMPTY_FORM)
   }, [editing, open])
 
@@ -255,6 +247,48 @@ const GridModal = ({ open, onClose, onSave, availableCols, editing }) => {
               <span style={{ fontSize:10, color:C.textMuted }}>
                 Enable for article-level grids that only need the pivot output
               </span>
+            </Field>
+            <Field label="Weightage">
+              <input type="number" step="0.1" min="0" value={form.weightage ?? 1.0}
+                onChange={e => set('weightage', parseFloat(e.target.value) || 0)}
+                style={{ width:'100%', padding:'6px 10px', borderRadius:6, border:`1px solid ${C.inputBd}`,
+                  fontSize:12, background:C.inputBg }} placeholder="1.0" />
+              <span style={{ fontSize:10, color:C.textMuted }}>Priority weight for this grid (higher = more important)</span>
+            </Field>
+            <Field label="Grid Group">
+              <select value={form.grid_group || 'Primary'}
+                onChange={e => set('grid_group', e.target.value)}
+                style={{ width:'100%', padding:'6px 10px', borderRadius:6, border:`1px solid ${C.inputBd}`,
+                  fontSize:12, background:C.inputBg }}>
+                <option value="None">None</option>
+                <option value="Primary">Primary</option>
+                <option value="Secondary">Secondary</option>
+              </select>
+              <span style={{ fontSize:10, color:C.textMuted }}>Classification: Primary grids are core, Secondary are supplementary</span>
+            </Field>
+            <Field label="Use for PER_OPT_SALE">
+              <label style={{
+                display:'flex', alignItems:'center', gap:6, fontSize:11,
+                cursor: optSaleLocked ? 'not-allowed' : 'pointer',
+                opacity: optSaleLocked ? 0.55 : 1,
+              }}>
+                <input type="checkbox" checked={!!form.use_for_opt_sale}
+                  disabled={optSaleLocked}
+                  onChange={e => set('use_for_opt_sale', e.target.checked)}
+                  style={{ width:14, height:14, cursor: optSaleLocked ? 'not-allowed' : 'pointer' }} />
+                Use this grid's MBQ &amp; DISP_Q for listing PER_OPT_SALE
+              </label>
+              {optSaleLocked ? (
+                <span style={{ fontSize:10, color:C.red, fontWeight:600 }}>
+                  🔒 Locked — already assigned to grid:{' '}
+                  <strong>{existingOptSaleGrid?.grid_name}</strong>. Uncheck it there first to reassign.
+                </span>
+              ) : (
+                <span style={{ fontSize:10, color:C.textMuted }}>
+                  Only ONE grid can be selected for PER_OPT_SALE source.
+                  Formula: ((MBQ − DISP_Q) / DISP_Q × DPN) / SAL_D
+                </span>
+              )}
             </Field>
           </div>
 
@@ -538,7 +572,7 @@ export default function GridBuilderPage() {
             <table style={{ width:'100%', borderCollapse:'collapse', fontSize:10, minWidth:700 }}>
               <thead>
                 <tr style={{ background:'#f1f5f9', borderBottom:`2px solid ${C.cardBorder}` }}>
-                  {['#','Grid Name','Output Table','Hierarchy','KPI',
+                  {['#','Grid Name','Output Table','Hierarchy','KPI','Group','Wt',
                     'Last Run','Status','Rows','Time','Alerts','Actions'].map(h => (
                     <th key={h} style={{ padding:'5px 8px', textAlign:'left',
                       fontSize:9, fontWeight:700, color:C.textSub,
@@ -609,7 +643,32 @@ export default function GridBuilderPage() {
                           {g.pivot_only && <span style={{ fontSize:7, fontWeight:700, color:'#7c3aed',
                             background:'#ede9fe', border:'1px solid #c4b5fd',
                             padding:'0px 4px', borderRadius:3 }}>PIVOT ONLY</span>}
+                          {g.use_for_opt_sale && <span style={{ fontSize:7, fontWeight:700, color:C.green,
+                            background:C.greenBg, border:`1px solid ${C.greenBd}`,
+                            padding:'0px 4px', borderRadius:3 }} title="Source for PER_OPT_SALE">OPT_SALE</span>}
                         </div>
+                      </td>
+
+                      {/* Grid Group */}
+                      <td style={{ padding:'4px 8px' }}>
+                        {g.grid_group && g.grid_group !== 'None' ? (
+                          <span style={{ fontSize:9, fontWeight:600,
+                            color: g.grid_group === 'Secondary' ? C.amber : C.primary,
+                            background: g.grid_group === 'Secondary' ? C.amberBg : C.primaryLt,
+                            border: `1px solid ${g.grid_group === 'Secondary' ? C.amberBd : C.primaryBd}`,
+                            padding:'1px 5px', borderRadius:3 }}>
+                            {g.grid_group}
+                          </span>
+                        ) : (
+                          <span style={{ fontSize:9, color:C.textMuted }}>—</span>
+                        )}
+                      </td>
+
+                      {/* Weightage */}
+                      <td style={{ padding:'4px 8px', textAlign:'center' }}>
+                        <span style={{ fontSize:10, fontWeight:600, color:C.text }}>
+                          {g.weightage != null ? g.weightage : 1.0}
+                        </span>
                       </td>
 
                       {/* Last run */}
@@ -730,7 +789,7 @@ export default function GridBuilderPage() {
 
       {/* Modals */}
       <GridModal open={modalOpen} onClose={() => { setModalOpen(false); setEditing(null) }}
-        onSave={handleSave} availableCols={availCols} editing={editing}/>
+        onSave={handleSave} availableCols={availCols} editing={editing} allGrids={grids}/>
       <RunResultsModal results={runResults} onClose={() => setRunResults(null)}/>
 
       {/* Calculation Log Modal */}

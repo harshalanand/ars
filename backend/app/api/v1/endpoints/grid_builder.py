@@ -17,10 +17,10 @@ Endpoints:
 """
 
 import json
-from datetime import datetime
-from typing import List, Optional, Any
+import time
+from typing import List, Optional, Set
 
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, validator
 from sqlalchemy import text
 from loguru import logger
@@ -28,12 +28,19 @@ from loguru import logger
 from app.database.session import get_data_engine
 from app.schemas.common import APIResponse
 from app.security.dependencies import get_current_user
-from app.services.grid_calculations import calculate_per_day_sale, ensure_primary_keys
+from app.services.grid_calculations import calculate_per_day_sale
 from app.models.rbac import User
+from app.utils.db_helpers import (
+    run_sql, get_columns as _db_get_columns, column_exists, ensure_column, get_col_type_sql,
+)
 
 router      = APIRouter(prefix="/grid-builder", tags=["Grid Builder"])
 GRID_TABLE  = "ARS_GRID_BUILDER"
+GRID_HIER_TABLE = "ARS_GRID_HIERARCHY"   # managed table with 1 column per grid hierarchy level
 VALID_STATUS = {"Active", "Inactive"}
+
+# Grids whose hierarchy contains these are article-level → skip for hierarchy table
+_ARTICLE_LEVEL_COLS = {"GEN_ART_NUMBER", "ARTICLE_NUMBER", "GEN_ART", "VAR_ART"}
 
 
 # ── Schemas ──────────────────────────────────────────────────────────────────
@@ -46,6 +53,9 @@ class GridCreate(BaseModel):
     output_table:      str                 # e.g. ARS_GRID_STK_RESULT
     status:            str = "Active"
     pivot_only:        bool = False         # True = only pivot, skip lookups & MBQ/OPT_CNT
+    weightage:         Optional[float] = 1.0    # priority weight for this grid
+    grid_group:        Optional[str] = "Primary" # Primary / Secondary / None
+    use_for_opt_sale:  bool = False              # use this grid's MBQ/DISP_Q for listing PER_OPT_SALE
 
     @validator("status")
     def _chk(cls, v):
@@ -75,6 +85,9 @@ class GridUpdate(BaseModel):
     output_table:      Optional[str]       = None
     status:            Optional[str]       = None
     pivot_only:        Optional[bool]      = None
+    weightage:         Optional[float]     = None
+    grid_group:        Optional[str]       = None
+    use_for_opt_sale:  Optional[bool]      = None
 
     @validator("status")
     def _chk(cls, v):
@@ -85,9 +98,7 @@ class GridUpdate(BaseModel):
 
 # ── DDL / helpers ─────────────────────────────────────────────────────────────
 
-def _run(conn, sql: str, params: dict = None):
-    conn.execute(text(sql), params or {})
-    conn.commit()
+_run = run_sql  # shared helper: execute + commit
 
 
 def _shrink_db_files(engine):
@@ -154,6 +165,30 @@ def _ensure_grid_table(engine):
                 ALTER TABLE {GRID_TABLE} ADD pivot_only BIT NOT NULL DEFAULT 0
             END
         """)
+        # Add weightage (numeric priority weight)
+        _run(c, f"""
+            IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+                           WHERE TABLE_NAME='{GRID_TABLE}' AND COLUMN_NAME='weightage')
+            BEGIN
+                ALTER TABLE {GRID_TABLE} ADD weightage FLOAT NULL DEFAULT 1.0
+            END
+        """)
+        # Add grid_group (Primary / Secondary classification)
+        _run(c, f"""
+            IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+                           WHERE TABLE_NAME='{GRID_TABLE}' AND COLUMN_NAME='grid_group')
+            BEGIN
+                ALTER TABLE {GRID_TABLE} ADD grid_group NVARCHAR(50) NULL DEFAULT 'Primary'
+            END
+        """)
+        # Add use_for_opt_sale flag (marks ONE grid as source for PER_OPT_SALE calc)
+        _run(c, f"""
+            IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+                           WHERE TABLE_NAME='{GRID_TABLE}' AND COLUMN_NAME='use_for_opt_sale')
+            BEGIN
+                ALTER TABLE {GRID_TABLE} ADD use_for_opt_sale BIT NOT NULL DEFAULT 0
+            END
+        """)
         # Auto-assign sequence where seq=0 based on id order
         _run(c, f"""
             ;WITH CTE AS (
@@ -168,6 +203,116 @@ def _ensure_grid_table(engine):
             SET last_run_status = 'Interrupted', last_run_error = 'Server stopped during run'
             WHERE last_run_status = 'Running'
         """)
+
+    # Also sync the hierarchy table
+    _ensure_hierarchy_table(engine)
+
+
+def _ensure_hierarchy_table(engine):
+    """
+    Auto-create and maintain ARS_GRID_HIERARCHY — a managed table whose
+    columns are derived from ARS_GRID_BUILDER grid definitions.
+
+    Rules:
+      - Base columns: WERKS, MAJ_CAT (always present)
+      - One column per active non-article grid, named after the LAST
+        hierarchy column (e.g. RNG_SEG, MACRO_MVGR, FAB, CLR, M_VND_CD)
+      - Column order follows grid.seq
+      - Grids with GEN_ART/VAR_ART in hierarchy are skipped
+      - Table is created if missing; new columns are ADDed, removed ones stay
+    """
+    with engine.connect() as conn:
+        # Read grid definitions
+        try:
+            grids = conn.execute(text(f"""
+                SELECT grid_name, hierarchy_columns, seq
+                FROM {GRID_TABLE}
+                WHERE UPPER(status) = 'ACTIVE'
+                ORDER BY seq ASC, id ASC
+            """)).fetchall()
+        except Exception:
+            return  # ARS_GRID_BUILDER might not exist yet
+
+        # Derive column list from grids
+        hier_cols = []  # [(col_name, grid_name, seq)]
+        for gname, hier_json, seq in grids:
+            try:
+                hier = json.loads(hier_json) if isinstance(hier_json, str) else hier_json
+            except Exception:
+                continue
+            if not hier or len(hier) < 2:
+                continue
+            # Skip article-level grids
+            if any(h.upper() in _ARTICLE_LEVEL_COLS for h in hier):
+                continue
+            last_col = hier[-1].upper()
+            # Skip WERKS/MAJ_CAT (already base columns)
+            if last_col in ("WERKS", "MAJ_CAT"):
+                continue
+            hier_cols.append((last_col, gname, seq))
+
+        if not hier_cols:
+            return
+
+        # Check if table exists
+        tbl_exists = conn.execute(text(
+            "SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = :t"
+        ), {"t": GRID_HIER_TABLE}).scalar() > 0
+
+        if not tbl_exists:
+            # Create with MAJ_CAT as base + all derived columns (in seq order)
+            col_defs = "[MAJ_CAT] NVARCHAR(100) NOT NULL"
+            for col_name, gname, seq in hier_cols:
+                col_defs += f", [{col_name}] NVARCHAR(200) NULL"
+            _run(conn, f"""
+                CREATE TABLE [{GRID_HIER_TABLE}] (
+                    {col_defs},
+                    CONSTRAINT PK_{GRID_HIER_TABLE} PRIMARY KEY ([MAJ_CAT])
+                )
+            """)
+            logger.info(f"Created {GRID_HIER_TABLE} with columns: MAJ_CAT, {', '.join(c[0] for c in hier_cols)}")
+        else:
+            # Table exists — check if columns match expected order
+            existing_rows = conn.execute(text(
+                "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
+                "WHERE TABLE_NAME = :t ORDER BY ORDINAL_POSITION"
+            ), {"t": GRID_HIER_TABLE}).fetchall()
+            existing_ordered = [r[0].upper() for r in existing_rows]
+            expected_ordered = ["MAJ_CAT"] + [c[0] for c in hier_cols]
+
+            if existing_ordered == expected_ordered:
+                return  # Already in correct order, nothing to do
+
+            # Column list or order differs — rebuild table to match new seq
+            # 1. Save existing data
+            old_cols = [r[0] for r in existing_rows]
+            has_data = conn.execute(text(f"SELECT COUNT(*) FROM [{GRID_HIER_TABLE}]")).scalar() > 0
+            backup = f"#hier_backup"
+            if has_data:
+                _run(conn, f"SELECT * INTO {backup} FROM [{GRID_HIER_TABLE}]")
+
+            # 2. Drop + recreate with correct column order
+            _run(conn, f"DROP TABLE [{GRID_HIER_TABLE}]")
+            col_defs = "[MAJ_CAT] NVARCHAR(100) NOT NULL"
+            for col_name, gname, seq in hier_cols:
+                col_defs += f", [{col_name}] NVARCHAR(200) NULL"
+            _run(conn, f"""
+                CREATE TABLE [{GRID_HIER_TABLE}] (
+                    {col_defs},
+                    CONSTRAINT PK_{GRID_HIER_TABLE} PRIMARY KEY ([MAJ_CAT])
+                )
+            """)
+
+            # 3. Restore data (only columns that exist in both old and new)
+            if has_data:
+                new_cols = ["MAJ_CAT"] + [c[0] for c in hier_cols]
+                common = [c for c in new_cols if c in {x.upper() for x in old_cols}]
+                if common:
+                    col_list = ", ".join(f"[{c}]" for c in common)
+                    _run(conn, f"INSERT INTO [{GRID_HIER_TABLE}] ({col_list}) SELECT {col_list} FROM {backup}")
+                _run(conn, f"DROP TABLE {backup}")
+
+            logger.info(f"{GRID_HIER_TABLE}: rebuilt with column order: {expected_ordered}")
 
 
 def _row_to_dict(r) -> dict:
@@ -194,6 +339,9 @@ def _row_to_dict(r) -> dict:
         "last_run_error":    r[13],
         "duration_sec":      r[14] if len(r) > 14 else None,
         "pivot_only":        bool(r[15]) if len(r) > 15 else False,
+        "weightage":         r[16] if len(r) > 16 else 1.0,
+        "grid_group":        r[17] if len(r) > 17 else "Primary",
+        "use_for_opt_sale":  bool(r[18]) if len(r) > 18 else False,
     }
 
 
@@ -201,13 +349,7 @@ def _get_table_columns(engine, table_name: str) -> List[str]:
     """Return column names for a table/view from INFORMATION_SCHEMA."""
     try:
         with engine.connect() as conn:
-            rows = conn.execute(text("""
-                SELECT COLUMN_NAME
-                FROM INFORMATION_SCHEMA.COLUMNS
-                WHERE TABLE_NAME = :tbl
-                ORDER BY ORDINAL_POSITION
-            """), {"tbl": table_name}).fetchall()
-        return [r[0] for r in rows]
+            return _db_get_columns(conn, table_name)
     except Exception as e:
         logger.warning(f"Could not read {table_name} columns: {e}")
         return []
@@ -254,10 +396,11 @@ POST_PIVOT_LOOKUPS = [
         "requires":     ["WERKS"],
         "filter":       {"column": "LISTING", "value": "1"},
     },
-    # 2. Lookup from ARS_CALC_ST_MAJ_CAT (has SAL_D, SAL_PD — MBQ/OPT_CNT calculated after CONT join)
+    # 2. Lookup from ARS_CALC_ST_MAJ_CAT (has SAL_D, SAL_PD, CONT — MBQ/OPT_CNT calculated after)
+    #    CONT: ST_MAJ_CAT first, CO_MAJ_CAT fallback (merged during pre-grid calc)
     {
         "lookup_table": "ARS_CALC_ST_MAJ_CAT",
-        "columns":      ["DISP_Q", "DPN", "SAL_D", "SAL_PD", "DISP_GR_DGR", "LW_ACT_SL_GR_DGR", "BGT_SL_GR_DGR", "MANUAL_MBQ"],
+        "columns":      ["DISP_Q", "DPN", "SAL_D", "SAL_PD", "DISP_GR_DGR", "LW_ACT_SL_GR_DGR", "BGT_SL_GR_DGR", "MANUAL_MBQ", "CONT"],
         "join_on":      {"WERKS": "ST_CD", "MAJ_CAT": "MAJ_CAT"},
         "requires":     ["WERKS", "MAJ_CAT"],
     },
@@ -285,32 +428,24 @@ def _resolve_template(template: str, hier_cols: List[str]) -> str:
     return result
 
 
-def _get_col_type_sql(conn, table_name: str, col_name: str) -> str:
-    """Get SQL type string for a column from INFORMATION_SCHEMA."""
-    row = conn.execute(text(
-        "SELECT DATA_TYPE, CHARACTER_MAXIMUM_LENGTH, NUMERIC_PRECISION, NUMERIC_SCALE "
-        "FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = :tbl AND COLUMN_NAME = :col"
-    ), {"tbl": table_name, "col": col_name}).fetchone()
-    if not row:
-        return "NVARCHAR(255)"
-    dt = row[0].upper()
-    if dt in ("NVARCHAR", "VARCHAR", "NCHAR", "CHAR"):
-        ml = row[1]
-        return f"{dt}({ml})" if ml and ml > 0 else f"{dt}(MAX)"
-    elif dt in ("DECIMAL", "NUMERIC"):
-        return f"{dt}({row[2] or 18},{row[3] or 2})"
-    return dt
+_get_col_type_sql = get_col_type_sql  # shared helper
 
 
-def _apply_post_lookups(conn, out_table: str, hier_cols: List[str]) -> List[str]:
+def _apply_post_lookups(conn, out_table: str, hier_cols: List[str], skip_cont: bool = False) -> List[str]:
     """
     After pivot INSERT, join lookup tables and add extra columns.
+    skip_cont: if True, skip CONT lookup (for article-level grids).
     Returns list of warning messages (e.g. missing tables).
     """
     hier_upper = {c.upper(): c for c in hier_cols}
     warnings = []
 
     for cfg in POST_PIVOT_LOOKUPS:
+        # Skip CONT lookup for article-level grids
+        if skip_cont and "CONT" in cfg.get("columns", []):
+            logger.info(f"Skipping CONT lookup for article-level grid {out_table}")
+            continue
+
         # Check all required hierarchy columns are present
         if not all(r in hier_upper for r in cfg["requires"]):
             continue
@@ -364,21 +499,56 @@ def _apply_post_lookups(conn, out_table: str, hier_cols: List[str]) -> List[str]
             continue
 
         # Resolve template in join_on keys and values
+        # Get actual columns from lookup table to handle name mismatches
+        lkp_actual_cols = {r[0].upper(): r[0] for r in conn.execute(text(
+            "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = :tbl"
+        ), {"tbl": lookup_table}).fetchall()}
+
         join_on = {}
+        join_skip = False
         for out_col, lkp_col in cfg["join_on"].items():
             resolved_out = _resolve_template(out_col, hier_cols)
             resolved_lkp = _resolve_template(lkp_col, hier_cols)
+            # Auto-fix: if resolved lookup column doesn't exist, try matching by suffix
+            # e.g., grid has "M_VND_CD" but lookup table has "VND_CD"
+            if resolved_lkp.upper() not in lkp_actual_cols:
+                matched = None
+                for actual_upper, actual_name in lkp_actual_cols.items():
+                    if resolved_lkp.upper().endswith(actual_upper) or actual_upper.endswith(resolved_lkp.upper()):
+                        matched = actual_name
+                        break
+                if matched:
+                    logger.info(f"Post-lookup column fix: [{resolved_lkp}] -> [{matched}] in {lookup_table}")
+                    resolved_lkp = matched
+                else:
+                    warnings.append(f"Column [{resolved_lkp}] not found in {lookup_table}")
+                    join_skip = True
+                    break
+            else:
+                resolved_lkp = lkp_actual_cols[resolved_lkp.upper()]
             join_on[resolved_out] = resolved_lkp
+
+        if join_skip:
+            continue
 
         # Resolve columns: ["*"] = all columns from lookup except join-target columns
         columns = cfg["columns"]
+        # Get actual columns in lookup table
+        all_lkp_col_rows = conn.execute(text(
+            "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
+            "WHERE TABLE_NAME = :tbl ORDER BY ORDINAL_POSITION"
+        ), {"tbl": lookup_table}).fetchall()
+        lkp_col_set = {r[0].upper() for r in all_lkp_col_rows}
+
         if columns == ["*"]:
-            all_lkp_cols = conn.execute(text(
-                "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
-                "WHERE TABLE_NAME = :tbl ORDER BY ORDINAL_POSITION"
-            ), {"tbl": lookup_table}).fetchall()
             join_target_cols = {v.upper() for v in join_on.values()}
-            columns = [r[0] for r in all_lkp_cols if r[0].upper() not in join_target_cols]
+            columns = [r[0] for r in all_lkp_col_rows if r[0].upper() not in join_target_cols]
+        else:
+            # Filter to only columns that actually exist in the lookup table
+            missing = [c for c in columns if c.upper() not in lkp_col_set]
+            if missing:
+                logger.info(f"Post-lookup: columns {missing} not in {lookup_table}, skipping them")
+            columns = [c for c in columns if c.upper() in lkp_col_set]
 
         if not columns:
             logger.info(f"Post-lookup skipped: no columns to add from {lookup_table}")
@@ -470,18 +640,8 @@ def _apply_post_lookups(conn, out_table: str, hier_cols: List[str]) -> List[str]
 # OPT_CNT = ROUND(DISP_Q * CONT / DPN, 1)
 # ==========================================================================
 
-def _col_exists_in(conn, tbl, col):
-    return conn.execute(text(
-        "SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = :tbl AND COLUMN_NAME = :col"
-    ), {"tbl": tbl, "col": col}).scalar() > 0
-
-
-def _ensure_output_col(conn, tbl, col, col_type="FLOAT"):
-    if not _col_exists_in(conn, tbl, col):
-        try:
-            _run(conn, f"ALTER TABLE [{tbl}] ADD [{col}] {col_type} NULL")
-        except Exception:
-            pass
+_col_exists_in = column_exists  # shared helper
+_ensure_output_col = ensure_column  # shared helper
 
 
 def _calculate_grid_columns(conn, out_table: str) -> List[str]:
@@ -522,8 +682,8 @@ def _calculate_grid_columns(conn, out_table: str) -> List[str]:
         except Exception as e:
             warnings.append(f"MBQ error: {str(e)[:150]}")
 
-    # ── OPT_CNT = ROUND(DISP_Q * CONT / DPN, 1) ───────────────────────────
-    opt_required = ["DISP_Q", "CONT", "DPN"]
+    # ── OPT_CNT = ROUND(DISP_Q * DISP_GR_DGR * CONT / DPN, 0) ─────────────
+    opt_required = ["DISP_Q", "CONT", "DPN", "DISP_GR_DGR"]
     opt_missing = [c for c in opt_required if not _col_exists_in(conn, out_table, c)]
     if opt_missing:
         warnings.append(f"OPT_CNT skipped: missing {opt_missing}")
@@ -536,6 +696,8 @@ def _calculate_grid_columns(conn, out_table: str) -> List[str]:
                         WHEN ISNULL(TRY_CAST([CONT] AS FLOAT), 0) = 0 THEN 0
                         WHEN ISNULL(TRY_CAST([DPN] AS FLOAT), 0) = 0 THEN 0
                         ELSE ROUND(ISNULL(TRY_CAST([DISP_Q] AS FLOAT), 0)
+                                 * CASE WHEN ISNULL(TRY_CAST([DISP_GR_DGR] AS FLOAT), 0) = 0 THEN 1
+                                        ELSE TRY_CAST([DISP_GR_DGR] AS FLOAT) END
                                  * TRY_CAST([CONT] AS FLOAT)
                                  / TRY_CAST([DPN] AS FLOAT), 0)
                     END
@@ -543,6 +705,21 @@ def _calculate_grid_columns(conn, out_table: str) -> List[str]:
             logger.info(f"OPT_CNT calculated in {out_table}")
         except Exception as e:
             warnings.append(f"OPT_CNT error: {str(e)[:150]}")
+
+    # ── DISP_Q = DISP_Q * CONT  (effective display qty after contribution)
+    # IMPORTANT: must run AFTER MBQ and OPT_CNT since those use the RAW DISP_Q.
+    if _col_exists_in(conn, out_table, "DISP_Q") and _col_exists_in(conn, out_table, "CONT"):
+        try:
+            _run(conn, f"""
+                UPDATE [{out_table}] SET [DISP_Q] =
+                    CASE WHEN ISNULL(TRY_CAST([CONT] AS FLOAT), 0) = 0 THEN 0
+                         ELSE ROUND(ISNULL(TRY_CAST([DISP_Q] AS FLOAT), 0)
+                                  * TRY_CAST([CONT] AS FLOAT), 0)
+                    END
+            """)
+            logger.info(f"DISP_Q multiplied by CONT in {out_table}")
+        except Exception as e:
+            warnings.append(f"DISP_Q*CONT error: {str(e)[:150]}")
 
     return warnings
 
@@ -604,16 +781,62 @@ def _build_and_run_grid(engine, grid: dict) -> dict:
     stk_cols = _get_table_columns(engine, "ET_STORE_STOCK")
     stk_cols_upper = {c.upper() for c in stk_cols}
 
+    # Dynamically detect numeric columns from INFORMATION_SCHEMA
+    # (so numeric cols use ISNULL(..., 0) instead of 'NA' which would fail)
+    _NUMERIC_TYPES = {'bigint', 'int', 'smallint', 'tinyint',
+                      'float', 'real', 'decimal', 'numeric', 'money', 'smallmoney'}
+    mp_type_map = {}   # upper col name → data_type (lowercase)
+    stk_type_map = {}
+    try:
+        with engine.connect() as _tc:
+            for r in _tc.execute(text(
+                "SELECT COLUMN_NAME, DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS "
+                "WHERE TABLE_NAME IN ('vw_master_product','ET_STORE_STOCK')"
+            )).fetchall():
+                cname, ctype = r[0].upper(), r[1].lower()
+                # There's one row per (table, column); but the table name isn't returned.
+                # Since columns may overlap, we populate both maps — membership check
+                # in stk_cols_upper/mp_cols_upper disambiguates.
+                if cname in stk_cols_upper:
+                    stk_type_map[cname] = ctype
+                if cname in mp_cols_upper:
+                    mp_type_map[cname] = ctype
+    except Exception as _e:
+        logger.warning(f"Could not load column types: {_e}")
+
+    def _is_num(col_upper: str, src: str) -> bool:
+        m = mp_type_map if src == 'mp' else stk_type_map
+        return m.get(col_upper, '') in _NUMERIC_TYPES
+
+    # Fallback set for columns that might exist in ET_STORE_STOCK but not enumerated
+    _BIGINT_COLS = {"ARTICLE_NUMBER", "GEN_ART_NUMBER", "MATNR"}
+
     hier_select_parts = []
     has_mp_cols       = False
+    numeric_hier: Set[str] = set()   # hier cols that should be numeric (for DDL + PK)
     for col in hier_cols:
-        if col.upper() in mp_cols_upper:
-            actual = mp_cols_upper[col.upper()]
-            # Alias to ensure consistent column name after PIVOT
-            hier_select_parts.append(f"MP.[{actual}] AS [{col}]")
+        # Priority: ET_STORE_STOCK first (WERKS, MATNR always from fact table)
+        # then vw_master_product (LEFT JOIN — can be NULL if no match)
+        # ISNULL wraps MP columns: numeric→0, text→'NA' (prevents NULL PKs)
+        cu = col.upper()
+        if cu in stk_cols_upper:
+            is_num = _is_num(cu, 'stk') or cu in _BIGINT_COLS
+            if is_num:
+                numeric_hier.add(cu)
+                expr = f"TRY_CAST(STK.[{col}] AS BIGINT) AS [{col}]"
+            else:
+                expr = f"STK.[{col}]"
+            hier_select_parts.append(expr)
+        elif cu in mp_cols_upper:
+            actual = mp_cols_upper[cu]
+            is_num = _is_num(cu, 'mp') or cu in _BIGINT_COLS
+            if is_num:
+                numeric_hier.add(cu)
+                expr = f"ISNULL(TRY_CAST(MP.[{actual}] AS BIGINT), 0) AS [{col}]"
+            else:
+                expr = f"ISNULL(MP.[{actual}], 'NA') AS [{col}]"
+            hier_select_parts.append(expr)
             has_mp_cols = True
-        elif col.upper() in stk_cols_upper:
-            hier_select_parts.append(f"STK.[{col}]")
         else:
             hier_select_parts.append(f"STK.[{col}]")
 
@@ -623,9 +846,15 @@ def _build_and_run_grid(engine, grid: dict) -> dict:
         mp_join = "LEFT JOIN dbo.vw_master_product MP WITH (NOLOCK) ON STK.MATNR = MP.ARTICLE_NUMBER"
 
     # ── 4. Determine output columns & types for CREATE TABLE ─────────────────
-    col_defs = ", ".join(f"[{c}] NVARCHAR(200) NULL" for c in hier_cols)
-    col_defs += ", " + ", ".join(f"[{s}] NUMERIC(18,4) NULL" for s in slocs)
-    col_defs += ", [STK_TTL] NUMERIC(18,4) NULL"
+    col_defs_parts = []
+    for c in hier_cols:
+        if c.upper() in numeric_hier:
+            col_defs_parts.append(f"[{c}] BIGINT NULL")
+        else:
+            col_defs_parts.append(f"[{c}] NVARCHAR(200) NULL")
+    col_defs = ", ".join(col_defs_parts)
+    col_defs += ", " + ", ".join(f"[{s}] FLOAT NULL" for s in slocs)
+    col_defs += ", [STK_TTL] FLOAT NULL"
 
     all_cols  = ", ".join(f"[{c}]" for c in hier_cols) + \
                 ", " + q_slocs + ", [STK_TTL]"
@@ -649,12 +878,13 @@ def _build_and_run_grid(engine, grid: dict) -> dict:
         # Add columns for newly active SLOCs (and any missing hierarchy/STK_TTL cols)
         for s in slocs:
             if s.upper() not in existing_cols:
-                _run(conn, f"ALTER TABLE [{out_table}] ADD [{s}] NUMERIC(18,4) NULL")
+                _run(conn, f"ALTER TABLE [{out_table}] ADD [{s}] FLOAT NULL")
         for c in hier_cols:
             if c.upper() not in existing_cols:
-                _run(conn, f"ALTER TABLE [{out_table}] ADD [{c}] NVARCHAR(200) NULL")
+                ctype = "BIGINT NULL" if c.upper() in numeric_hier else "NVARCHAR(200) NULL"
+                _run(conn, f"ALTER TABLE [{out_table}] ADD [{c}] {ctype}")
         if "STK_TTL" not in existing_cols:
-            _run(conn, f"ALTER TABLE [{out_table}] ADD [STK_TTL] NUMERIC(18,4) NULL")
+            _run(conn, f"ALTER TABLE [{out_table}] ADD [STK_TTL] FLOAT NULL")
 
         # Drop columns for inactive SLOCs (columns not in expected set)
         for col_upper, col_actual in existing_cols.items():
@@ -682,11 +912,11 @@ def _build_and_run_grid(engine, grid: dict) -> dict:
                     pend_hier_parts.append(f"PA.[ST_CD] AS [{col}]")
                 elif cu in mp_cols_upper:
                     actual = mp_cols_upper[cu]
-                    pend_hier_parts.append(f"MP2.[{actual}] AS [{col}]")
-                elif cu in stk_cols_upper:
-                    pend_hier_parts.append(f"NULL AS [{col}]")
+                    default = "0" if cu in numeric_hier else "'NA'"
+                    pend_hier_parts.append(f"ISNULL(MP2.[{actual}], {default}) AS [{col}]")
                 else:
-                    pend_hier_parts.append(f"NULL AS [{col}]")
+                    default = "0" if cu in numeric_hier else "'NA'"
+                    pend_hier_parts.append(f"{default} AS [{col}]")
             pend_hier_select = ", ".join(pend_hier_parts)
 
             pend_union = f"""
@@ -709,6 +939,7 @@ WITH Stock_CTE AS (
     {mp_join}
     INNER JOIN ARS_STORE_SLOC_SETTINGS S WITH (NOLOCK) ON STK.SLOC = S.SLOC
     WHERE UPPER(S.STATUS) = 'ACTIVE'{kpi_clause}
+      AND STK.WERKS IS NOT NULL AND STK.WERKS <> ''
     {pend_union}
 )
 INSERT INTO [{out_table}] ({all_cols})
@@ -727,9 +958,15 @@ ORDER BY {', '.join(f'[{c}]' for c in hier_cols)};
         conn.commit()
 
         # ── 6. Post-pivot lookups & 7. MBQ/OPT_CNT ──────────────────────
+        # GEN_ART and VAR_ART grids: skip CONT lookup + MBQ/OPT_CNT
+        # (article-level grids only need LISTING filter + calc columns)
+        is_article_grid = any(c in hier_cols for c in ["GEN_ART_NUMBER", "ARTICLE_NUMBER", "GEN_ART", "VAR_ART"])
         lookup_warnings = []
         if grid.get("pivot_only"):
             logger.info(f"Pivot-only mode: skipping lookups & calculations for {out_table}")
+        elif is_article_grid:
+            logger.info(f"Article-level grid: applying lookups but skipping CONT/MBQ/OPT_CNT for {out_table}")
+            lookup_warnings = _apply_post_lookups(conn, out_table, hier_cols, skip_cont=True)
         else:
             lookup_warnings = _apply_post_lookups(conn, out_table, hier_cols)
             grid_calc_warnings = _calculate_grid_columns(conn, out_table)
@@ -738,6 +975,51 @@ ORDER BY {', '.join(f'[{c}]' for c in hier_cols)};
         # Count inserted rows
         count_row = conn.execute(text(f"SELECT COUNT(*) FROM [{out_table}]")).fetchone()
         row_count = count_row[0] if count_row else 0
+
+        # ── 8. Fill NULLs in hierarchy columns + add primary key ──────
+        try:
+            pk_name = f"PK_{out_table}"
+
+            # Drop existing PK if any
+            _run(conn, f"""
+                IF EXISTS (SELECT 1 FROM sys.key_constraints WHERE name='{pk_name}')
+                    ALTER TABLE [{out_table}] DROP CONSTRAINT [{pk_name}]
+            """)
+
+            # Fill NULLs: 0 for numeric columns, 'NA' for text columns
+            for c in hier_cols:
+                if c.upper() in numeric_hier:
+                    _run(conn, f"UPDATE [{out_table}] SET [{c}] = 0 WHERE [{c}] IS NULL")
+                else:
+                    _run(conn, f"UPDATE [{out_table}] SET [{c}] = 'NA' WHERE [{c}] IS NULL")
+            logger.info(f"PK prep: filled NULLs in hierarchy cols (numeric→0, text→'NA')")
+
+            # Delete duplicate rows (keep first occurrence per hierarchy key)
+            pk_cols_str = ", ".join(f"[{c}]" for c in hier_cols)
+            before = conn.execute(text(f"SELECT COUNT(*) FROM [{out_table}]")).scalar()
+            _run(conn, f"""
+                ;WITH CTE AS (
+                    SELECT *, ROW_NUMBER() OVER (PARTITION BY {pk_cols_str} ORDER BY [STK_TTL] DESC) AS rn
+                    FROM [{out_table}]
+                )
+                DELETE FROM CTE WHERE rn > 1
+            """)
+            after = conn.execute(text(f"SELECT COUNT(*) FROM [{out_table}]")).scalar()
+            if before != after:
+                logger.info(f"PK prep: removed {before - after} duplicate rows (kept highest STK_TTL)")
+
+            # Make hierarchy columns NOT NULL for PK
+            for c in hier_cols:
+                ctype = "BIGINT" if c.upper() in numeric_hier else "NVARCHAR(200)"
+                _run(conn, f"ALTER TABLE [{out_table}] ALTER COLUMN [{c}] {ctype} NOT NULL")
+
+            _run(conn, f"ALTER TABLE [{out_table}] ADD CONSTRAINT [{pk_name}] PRIMARY KEY ({pk_cols_str})")
+
+            row_count = conn.execute(text(f"SELECT COUNT(*) FROM [{out_table}]")).scalar()
+            logger.info(f"PK created on {out_table}: ({pk_cols_str}), {row_count} rows")
+        except Exception as e:
+            lookup_warnings.append(f"PK creation skipped: {str(e)[:100]}")
+            logger.warning(f"Could not create PK on {out_table}: {e}")
 
     return {"rows": row_count, "error": None, "warnings": lookup_warnings}
 
@@ -767,7 +1049,7 @@ def list_grids(current_user: User = Depends(get_current_user)):
             SELECT id, grid_name, description, hierarchy_columns,
                    kpi_filter, output_table, status, seq,
                    created_at, updated_at,
-                   last_run_at, last_run_status, last_run_rows, last_run_error, duration_sec, pivot_only
+                   last_run_at, last_run_status, last_run_rows, last_run_error, duration_sec, pivot_only, weightage, grid_group, use_for_opt_sale
             FROM {GRID_TABLE}
             ORDER BY seq ASC, id ASC
         """)).fetchall()
@@ -805,11 +1087,16 @@ def create_grid(payload: GridCreate, current_user: User = Depends(get_current_us
 
         # Auto-assign next sequence
         max_seq = conn.execute(text(f"SELECT ISNULL(MAX(seq),0) FROM {GRID_TABLE}")).scalar() or 0
+        # If this grid is flagged use_for_opt_sale, unset any existing flag first
+        if payload.use_for_opt_sale:
+            conn.execute(text(f"UPDATE {GRID_TABLE} SET use_for_opt_sale = 0 WHERE ISNULL(use_for_opt_sale,0) = 1"))
         conn.execute(text(f"""
             INSERT INTO {GRID_TABLE}
-                (grid_name, description, hierarchy_columns, kpi_filter, output_table, status, seq, last_run_error, pivot_only, created_at, updated_at)
+                (grid_name, description, hierarchy_columns, kpi_filter, output_table, status, seq,
+                 last_run_error, pivot_only, weightage, grid_group, use_for_opt_sale, created_at, updated_at)
             VALUES
-                (:name, :desc, :hier, :kpi, :out, :status, :seq, :warn, :ponly, GETDATE(), GETDATE())
+                (:name, :desc, :hier, :kpi, :out, :status, :seq,
+                 :warn, :ponly, :wt, :grp, :uos, GETDATE(), GETDATE())
         """), {
             "name":   payload.grid_name,
             "desc":   payload.description,
@@ -820,8 +1107,12 @@ def create_grid(payload: GridCreate, current_user: User = Depends(get_current_us
             "seq":    max_seq + 1,
             "warn":   warn_msg,
             "ponly":  1 if payload.pivot_only else 0,
+            "wt":    payload.weightage or 1.0,
+            "grp":   payload.grid_group or "Primary",
+            "uos":   1 if payload.use_for_opt_sale else 0,
         })
         conn.commit()
+    _ensure_hierarchy_table(de)  # sync hierarchy table after new grid
     return APIResponse(success=True, message=f"Grid '{payload.grid_name}' created.",
                        data={"grid_name": payload.grid_name, "warnings": warnings})
 
@@ -840,6 +1131,9 @@ def update_grid(grid_id: int, payload: GridUpdate, current_user: User = Depends(
     if payload.output_table      is not None: sets.append("output_table=:output_table");   params["output_table"]      = payload.output_table.upper()
     if payload.status            is not None: sets.append("status=:status");               params["status"]            = payload.status
     if payload.pivot_only        is not None: sets.append("pivot_only=:ponly");             params["ponly"]             = 1 if payload.pivot_only else 0
+    if payload.weightage         is not None: sets.append("weightage=:wt");               params["wt"]                = payload.weightage
+    if payload.grid_group        is not None: sets.append("grid_group=:grp");             params["grp"]               = payload.grid_group
+    if payload.use_for_opt_sale  is not None: sets.append("use_for_opt_sale=:uos");       params["uos"]               = 1 if payload.use_for_opt_sale else 0
     if not sets:
         raise HTTPException(400, "No fields to update")
     sets.append("updated_at=GETDATE()")
@@ -855,8 +1149,12 @@ def update_grid(grid_id: int, payload: GridUpdate, current_user: User = Depends(
             params["warn"] = warn_msg
 
     with de.connect() as conn:
+        # Enforce "only one grid with use_for_opt_sale = 1"
+        if payload.use_for_opt_sale is True:
+            conn.execute(text(f"UPDATE {GRID_TABLE} SET use_for_opt_sale = 0 WHERE id <> :id AND ISNULL(use_for_opt_sale,0) = 1"), {"id": grid_id})
         conn.execute(text(f"UPDATE {GRID_TABLE} SET {', '.join(sets)} WHERE id=:id"), params)
         conn.commit()
+    _ensure_hierarchy_table(de)  # sync hierarchy table after update
     return APIResponse(success=True, message=f"Grid {grid_id} updated.", data={"id": grid_id, "warnings": warnings})
 
 
@@ -882,6 +1180,7 @@ def delete_grid(grid_id: int, current_user: User = Depends(get_current_user)):
         conn.execute(text(f"DELETE FROM {GRID_TABLE} WHERE id=:id"), {"id": grid_id})
         conn.commit()
 
+    _ensure_hierarchy_table(de)  # sync hierarchy table after delete
     return APIResponse(success=True,
         message=f"Grid {grid_id} and table [{out_table}] deleted.",
         data={"id": grid_id, "dropped_table": out_table})
@@ -897,7 +1196,7 @@ def run_grid(grid_id: int, current_user: User = Depends(get_current_user)):
             SELECT id, grid_name, description, hierarchy_columns,
                    kpi_filter, output_table, status, seq,
                    created_at, updated_at,
-                   last_run_at, last_run_status, last_run_rows, last_run_error, duration_sec, pivot_only
+                   last_run_at, last_run_status, last_run_rows, last_run_error, duration_sec, pivot_only, weightage, grid_group, use_for_opt_sale
             FROM {GRID_TABLE} WHERE id=:id
         """), {"id": grid_id}).fetchone()
 
@@ -923,7 +1222,7 @@ def run_grid(grid_id: int, current_user: User = Depends(get_current_user)):
 @router.get("/calculation-preview", response_model=APIResponse)
 def preview_calculations(current_user: User = Depends(get_current_user)):
     """Run the pre-grid calculation and return step-by-step logs with timing."""
-    import time as _time
+    _time = time
     de = get_data_engine()
     start = _time.time()
     with de.connect() as conn:
@@ -946,12 +1245,14 @@ def reorder_grids(body: dict, current_user: User = Depends(get_current_user)):
             conn.execute(text(f"UPDATE {GRID_TABLE} SET seq=:seq, updated_at=GETDATE() WHERE id=:id"),
                          {"seq": item["seq"], "id": item["id"]})
         conn.commit()
+    # Rebuild hierarchy table column order to match new seq
+    _ensure_hierarchy_table(de)
     return APIResponse(success=True, message=f"Sequence updated for {len(seq_list)} grid(s)")
 
 
 def _build_calc_table_once():
     """Build ARS_CALC_ST_MAJ_CAT once. Called before grid runs."""
-    import time as _time
+    _time = time
     de = get_data_engine()
     warnings = []
     start = _time.time()
@@ -972,7 +1273,7 @@ def _build_calc_table_once():
 
 def _run_single_grid(grid: dict) -> dict:
     """Run a single grid — used by both individual run and parallel run-all."""
-    import time as _time
+    _time = time
     de = get_data_engine()
     start = _time.time()
 
@@ -1027,7 +1328,7 @@ def run_all_active(current_user: User = Depends(get_current_user)):
             SELECT id, grid_name, description, hierarchy_columns,
                    kpi_filter, output_table, status, seq,
                    created_at, updated_at,
-                   last_run_at, last_run_status, last_run_rows, last_run_error, duration_sec, pivot_only
+                   last_run_at, last_run_status, last_run_rows, last_run_error, duration_sec, pivot_only, weightage, grid_group, use_for_opt_sale
             FROM {GRID_TABLE} WHERE status='Active' ORDER BY seq ASC, id ASC
         """)).fetchall()
 
@@ -1063,3 +1364,106 @@ def run_all_active(current_user: User = Depends(get_current_user)):
     return APIResponse(success=True,
         message=f"Run All complete: {success_count}/{len(results)} grids succeeded.",
         data={"results": results})
+
+
+# ===========================================================================
+# HIERARCHY TABLE — auto-managed from grid definitions
+# ===========================================================================
+
+@router.get("/hierarchy/schema", response_model=APIResponse)
+def get_hierarchy_schema(current_user: User = Depends(get_current_user)):
+    """Return the current ARS_GRID_HIERARCHY table structure (columns in seq order)."""
+    de = get_data_engine()
+    _ensure_grid_table(de)
+
+    with de.connect() as conn:
+        # Get grid → column mapping
+        grids = conn.execute(text(f"""
+            SELECT grid_name, hierarchy_columns, seq, status,
+                   ISNULL(weightage, 1.0) AS weightage,
+                   ISNULL(grid_group, 'None') AS grid_group
+            FROM {GRID_TABLE}
+            ORDER BY seq ASC, id ASC
+        """)).fetchall()
+
+        columns = []
+        for gname, hier_json, seq, status, wt, grp in grids:
+            try:
+                hier = json.loads(hier_json) if isinstance(hier_json, str) else hier_json
+            except Exception:
+                continue
+            if not hier or len(hier) < 2:
+                continue
+            if any(h.upper() in _ARTICLE_LEVEL_COLS for h in hier):
+                continue
+            last_col = hier[-1]
+            if last_col.upper() in ("WERKS", "MAJ_CAT"):
+                continue
+            columns.append({
+                "column_name": last_col.upper(),
+                "grid_name": gname,
+                "hierarchy": hier,
+                "seq": seq,
+                "status": status,
+                "weightage": wt,
+                "grid_group": grp,
+            })
+
+        # Check table status
+        tbl_exists = conn.execute(text(
+            "SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = :t"
+        ), {"t": GRID_HIER_TABLE}).scalar() > 0
+
+        row_count = 0
+        if tbl_exists:
+            row_count = conn.execute(text(f"SELECT COUNT(*) FROM [{GRID_HIER_TABLE}]")).scalar()
+
+    return APIResponse(
+        success=True,
+        message=f"{len(columns)} hierarchy columns from {len(grids)} grids",
+        data={
+            "table_name": GRID_HIER_TABLE,
+            "table_exists": tbl_exists,
+            "row_count": row_count,
+            "base_columns": ["MAJ_CAT"],
+            "grid_columns": columns,
+        },
+    )
+
+
+@router.get("/hierarchy/data", response_model=APIResponse)
+def get_hierarchy_data(
+    page: int = 1,
+    page_size: int = 100,
+    current_user: User = Depends(get_current_user),
+):
+    """Read data from ARS_GRID_HIERARCHY with pagination."""
+    de = get_data_engine()
+    with de.connect() as conn:
+        exists = conn.execute(text(
+            "SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = :t"
+        ), {"t": GRID_HIER_TABLE}).scalar() > 0
+        if not exists:
+            raise HTTPException(404, f"{GRID_HIER_TABLE} does not exist yet. Run any grid first.")
+
+        cols = [r[0] for r in conn.execute(text(
+            "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
+            "WHERE TABLE_NAME = :t ORDER BY ORDINAL_POSITION"
+        ), {"t": GRID_HIER_TABLE}).fetchall()]
+
+        total = conn.execute(text(f"SELECT COUNT(*) FROM [{GRID_HIER_TABLE}]")).scalar()
+        offset = (page - 1) * page_size
+        col_list = ", ".join(f"[{c}]" for c in cols)
+        rows = conn.execute(text(f"""
+            SELECT {col_list} FROM [{GRID_HIER_TABLE}]
+            ORDER BY [MAJ_CAT]
+            OFFSET :off ROWS FETCH NEXT :ps ROWS ONLY
+        """), {"off": offset, "ps": page_size}).fetchall()
+
+        data = [dict(zip(cols, row)) for row in rows]
+
+    return APIResponse(
+        success=True,
+        message=f"{len(data)} rows (page {page}, {total} total)",
+        data={"columns": cols, "data": data, "total": total, "page": page, "page_size": page_size},
+    )

@@ -9,16 +9,7 @@ import {
   ClipboardCheck, Download, Trash2, RefreshCw, Table2, Eye, Search,
   ChevronDown, CheckCircle2, XCircle, Loader, Clock, FileDown, Filter, X
 } from 'lucide-react'
-
-const C = {
-  cardBg:'#fff', cardBorder:'#e2e8f0', headerBg:'#f8fafc',
-  text:'#0f172a', textSub:'#475569', textMuted:'#94a3b8',
-  primary:'#4f46e5', primaryLight:'#eef2ff', primaryBd:'#c7d2fe',
-  green:'#059669', greenBg:'#ecfdf5', greenBd:'#a7f3d0',
-  red:'#dc2626', redBg:'#fef2f2',
-  amber:'#d97706', amberBg:'#fffbeb', amberBd:'#fde68a',
-  inputBg:'#fff', inputBorder:'#cbd5e1',
-}
+import { C } from '@/theme/colors'
 
 /* ── Small filter dropdown ── */
 function FilterDropdown({ column, options, selected, onChange }) {

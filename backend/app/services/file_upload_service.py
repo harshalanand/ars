@@ -139,8 +139,16 @@ class FileUploadService:
                 logger.warning(f"[{batch_id}] Dropping {bad_pk.sum()} rows with blank/null PK '{pk}'")
                 df = df[~bad_pk]
 
-        # Execute upsert
+        # Pre-validate data types before upsert — gives users actionable error details
+        validation_errors = self.upsert_engine.validate_data_types(
+            table_name=table_name,
+            df=df,
+            max_errors=200,
+        )
+        if validation_errors:
+            logger.warning(f"[{batch_id}] {len(validation_errors)} type validation errors found")
 
+        # Execute upsert (proceed even with warnings — TRY_CAST handles gracefully)
         result = self.upsert_engine.upsert(
             table_name=table_name,
             df=df,
@@ -152,6 +160,12 @@ class FileUploadService:
             enable_row_audit=True,  # Always enable row-level audit for batch uploads
             collect_sample_changes=False,  # Disable sample-only, log all changes
         )
+
+        # Attach validation errors to result so frontend can display them
+        if validation_errors:
+            existing = result.get("error_details") or []
+            result["validation_errors"] = validation_errors
+            result["error_details"] = existing
 
         # Log DataChangeLog for batch details (insert/update)
         from app.services.audit_service import log_bulk_changes

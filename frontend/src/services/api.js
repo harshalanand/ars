@@ -292,10 +292,15 @@ export const gridBuilderAPI = {
 
 // ============== Listing (Data Preparation) ==============
 export const listingAPI = {
-  config:   ()           => api.get('/listing/config'),
-  generate: (data)       => api.post('/listing/generate', data, { timeout: 600000 }),
-  preview:  (params)     => api.get('/listing/preview', { params }),
-  summary:  ()           => api.get('/listing/summary'),
+  config:       ()       => api.get('/listing/config'),
+  generate:     (data)   => api.post('/listing/generate', data, { timeout: 600000 }),
+  preview:      (params) => api.get('/listing/preview', { params }),
+  summary:      ()       => api.get('/listing/summary'),
+  export:       (params) => api.get('/listing/export', { params, responseType: 'blob', timeout: 600000 }),
+  createFinal:  (data)   => api.post('/listing/create-final', data || {}),
+  storeRanking: (params) => api.get('/listing/store-ranking', { params }),
+  finalPreview: (params) => api.get('/listing/final/preview', { params }),
+  saveSettings: (data)   => api.post('/listing/settings', data),
 }
 
 // ============== Lookup Art Master (Data Preparation) ==============

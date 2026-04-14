@@ -63,12 +63,21 @@ class TableManagementService:
         if table_name.lower() in PROTECTED_TABLES:
             raise ValueError(f"Cannot create table with protected name: {table_name}")
 
-        # Check if table already exists
+        # Check if table already exists in registry AND in actual DB
         existing = self.db.query(TableRegistry).filter(
             TableRegistry.table_name == table_name
         ).first()
         if existing and existing.is_active:
-            raise ValueError(f"Table '{table_name}' already exists")
+            # Verify it actually exists in data DB
+            with self.data_engine.connect() as check_conn:
+                real_exists = check_conn.execute(text(
+                    "SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = :t"
+                ), {"t": table_name}).scalar() > 0
+            if real_exists:
+                raise ValueError(f"Table '{table_name}' already exists")
+            else:
+                # Registry says exists but DB doesn't — allow recreation
+                logger.info(f"Table '{table_name}' in registry but not in DB, recreating")
 
         # Validate columns
         if not columns:
@@ -91,6 +100,9 @@ class TableManagementService:
 
         try:
             with self.data_engine.connect() as conn:
+                # Drop if exists (from previous failed attempt)
+                conn.execute(text(f"IF OBJECT_ID('[{table_name}]','U') IS NOT NULL DROP TABLE [{table_name}]"))
+                conn.commit()
                 conn.execute(text(create_sql))
                 conn.commit()
         except Exception as e:
@@ -790,8 +802,11 @@ class TableManagementService:
         else:
             type_sql = data_type
 
-        # Nullable
-        null_sql = "NULL" if col.get("is_nullable", True) else "NOT NULL"
+        # Nullable — PK columns must be NOT NULL
+        if col.get("is_primary_key"):
+            null_sql = "NOT NULL"
+        else:
+            null_sql = "NULL" if col.get("is_nullable", True) else "NOT NULL"
 
         # Default
         default_sql = ""
