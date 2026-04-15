@@ -299,6 +299,7 @@ export const listingAPI = {
   export:       (params) => api.get('/listing/export', { params, responseType: 'blob', timeout: 600000 }),
   createFinal:  (data)   => api.post('/listing/create-final', data || {}),
   storeRanking: (params) => api.get('/listing/store-ranking', { params }),
+  allocPreview: (params) => api.get('/listing/alloc-preview', { params }),
   finalPreview: (params) => api.get('/listing/final/preview', { params }),
   saveSettings: (data)   => api.post('/listing/settings', data),
 }

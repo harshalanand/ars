@@ -175,7 +175,7 @@ export default function ListingPage() {
   const [previewPage, setPreviewPage] = useState(1)
   const [previewPageSize, setPreviewPageSize] = useState(100)
   const [globalSearch, setGlobalSearch] = useState('')
-  const [previewTable, setPreviewTable] = useState('working') // 'working' | 'listing'
+  const [previewTable, setPreviewTable] = useState('working') // 'working' | 'listing' | 'alloc'
 
   // Column filters for preview (key = column name, value = filter text)
   const [colFilters, setColFilters] = useState({})
@@ -312,7 +312,9 @@ export default function ListingPage() {
       const url = URL.createObjectURL(data)
       const a = document.createElement('a')
       a.href = url
-      a.download = previewTable === 'working' ? 'ARS_LISTING_WORKING.xlsx' : 'ARS_LISTING.xlsx'
+      a.download = previewTable === 'working' ? 'ARS_LISTING_WORKING.xlsx'
+                 : previewTable === 'alloc'   ? 'ARS_ALLOC_WORKING.xlsx'
+                 : 'ARS_LISTING.xlsx'
       a.click()
       URL.revokeObjectURL(url)
       toast.success('Export complete', { id: 'export' })
@@ -499,8 +501,8 @@ export default function ListingPage() {
               display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                 <Eye size={12} color={C.textSub}/>
-                {/* Table toggle: Working vs Full Listing */}
-                {[['working', 'Working', C.green], ['listing', 'Full Listing', C.primary]].map(([v, l, clr]) => (
+                {/* Table toggle: Working / Full Listing / Alloc */}
+                {[['working', 'Working', C.green], ['listing', 'Full Listing', C.primary], ['alloc', 'Alloc', C.amber]].map(([v, l, clr]) => (
                   <button key={v}
                     onClick={() => { setPreviewTable(v); setColFilters({}); loadPreview(1, {}, undefined, v) }}
                     style={{ height: 22, fontSize: 9, fontWeight: 700, borderRadius: 4, padding: '0 8px', cursor: 'pointer',
