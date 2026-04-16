@@ -1232,6 +1232,33 @@ def preview_calculations(current_user: User = Depends(get_current_user)):
                        data={"steps": steps, "duration": duration})
 
 
+@router.post("/build-calc-tables", response_model=APIResponse)
+def build_calc_tables(current_user: User = Depends(get_current_user)):
+    """Build ARS_CALC_ST_MAJ_CAT and ARS_CALC_ST_ART independently (no grid run)."""
+    _time = time
+    de = get_data_engine()
+    start = _time.time()
+    warnings = []
+    try:
+        with de.connect() as conn:
+            steps = calculate_per_day_sale(conn)
+            for s in steps:
+                logger.info(f"[BuildCalc] {s['step']}: {s['detail']} ({s['status']})")
+                if s["status"] == "error":
+                    warnings.append(f"{s['step']}: {s['detail']}")
+    except Exception as e:
+        logger.error(f"Build calc tables failed: {e}")
+        raise HTTPException(500, detail=f"Calc table build failed: {str(e)[:200]}")
+    duration = round(_time.time() - start, 1)
+    ok_count = sum(1 for s in steps if s["status"] == "ok")
+    skip_count = sum(1 for s in steps if s["status"] == "skip")
+    err_count = sum(1 for s in steps if s["status"] == "error")
+    return APIResponse(
+        success=True,
+        message=f"Calc tables built in {duration}s — {ok_count} ok, {skip_count} skipped, {err_count} errors",
+        data={"steps": steps, "duration": duration, "warnings": warnings})
+
+
 @router.put("/reorder", response_model=APIResponse)
 def reorder_grids(body: dict, current_user: User = Depends(get_current_user)):
     """Update sequence order for grids. Body: {sequence: [{id, seq}, ...]}"""

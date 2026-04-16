@@ -369,6 +369,7 @@ export default function GridBuilderPage() {
   const [runResults,  setRunResults] = useState(null)
   const [deleteConf,  setDeleteConf] = useState(null)   // id to confirm delete
   const [calcLog,     setCalcLog]    = useState(null)   // calculation steps modal
+  const [buildingCalc, setBuildingCalc] = useState(false) // build calc tables in progress
 
   /* load */
   const load = useCallback(async () => {
@@ -474,6 +475,17 @@ export default function GridBuilderPage() {
     } catch {} finally { stopPoll(); setRunningId(null) }
   }
 
+  /* build calc tables */
+  const handleBuildCalc = async () => {
+    setBuildingCalc(true)
+    try {
+      const { data } = await gridBuilderAPI.buildCalcTables()
+      toast.success(data.message)
+      setCalcLog({ steps: data.data?.steps || [], duration: data.data?.duration || 0 })
+    } catch { toast.error('Build calc tables failed') }
+    finally { setBuildingCalc(false) }
+  }
+
   /* run all */
   const handleRunAll = async () => {
     setRunningAll(true)
@@ -540,6 +552,11 @@ export default function GridBuilderPage() {
               {runningAll
                 ? <><Loader size={13} style={{ animation:'spin 1s linear infinite' }}/> Running…</>
                 : <><PlayCircle size={13}/> Run All Active ({activeCount})</>}
+            </Btn>
+            <Btn onClick={handleBuildCalc} disabled={buildingCalc} color="amber">
+              {buildingCalc
+                ? <><Loader size={13} style={{ animation:'spin 1s linear infinite' }}/> Building…</>
+                : <><Database size={13}/> Build Calc Tables</>}
             </Btn>
             <Btn onClick={async () => {
               try {

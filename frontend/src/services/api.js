@@ -288,6 +288,7 @@ export const gridBuilderAPI = {
   runAll:      ()           => api.post('/grid-builder/run-all', null, { timeout: 1800000 }),
   reorder:     (sequence)   => api.put('/grid-builder/reorder', { sequence }),
   calcPreview: ()           => api.get('/grid-builder/calculation-preview'),
+  buildCalcTables: ()       => api.post('/grid-builder/build-calc-tables', null, { timeout: 600000 }),
 }
 
 // ============== Listing (Data Preparation) ==============

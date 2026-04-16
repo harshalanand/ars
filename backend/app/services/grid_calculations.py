@@ -108,116 +108,221 @@ def ensure_primary_keys(conn) -> List[str]:
 
 
 # ==========================================================================
-# STEP 1: CREATE CALC TABLE
+# STEP 1: CREATE CALC TABLE (CO base × stores)
 # ==========================================================================
 def _step_create_calc(conn, steps):
-    """Copy ST_MAJ_CAT → ARS_CALC_ST_MAJ_CAT."""
-    SRC  = TABLES["ST_MAJ"]
-    CALC = TABLES["CALC"]
-    if not _exists(conn, SRC):
-        steps.append({"step": "Create calc table", "detail": f"{SRC} not found", "status": "skip"})
-        return False
-    _run(conn, f"IF OBJECT_ID('{CALC}','U') IS NOT NULL DROP TABLE [{CALC}]")
-    _run(conn, f"SELECT * INTO [{CALC}] FROM [{SRC}] WITH (NOLOCK)")
+    """CO_MAJ_CAT × all stores → ARS_CALC_ST_MAJ_CAT (base layer).
 
-    # Ensure all output columns exist in calc table
+    Every store gets the CO-level values as a starting point.
+    If CO_MAJ_CAT is missing, falls back to copying ST_MAJ_CAT directly.
+    """
+    CO_MAJ  = TABLES["CO_MAJ"]
+    ST_MAST = TABLES["ST_MAST"]
+    ST_MAJ  = TABLES["ST_MAJ"]
+    CALC    = TABLES["CALC"]
+
+    has_co   = _exists(conn, CO_MAJ)
+    has_st   = _exists(conn, ST_MAJ)
+    has_mast = _exists(conn, ST_MAST)
+
+    if not has_co and not has_st:
+        steps.append({"step": "Create calc table", "detail": f"Neither {CO_MAJ} nor {ST_MAJ} found", "status": "skip"})
+        return False
+
+    _run(conn, f"IF OBJECT_ID('{CALC}','U') IS NOT NULL DROP TABLE [{CALC}]")
+
+    if has_co and has_mast:
+        # ── CO × stores: every store gets CO-level values ────────────
+        co_cols = [r[0] for r in conn.execute(text(
+            "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = :t"
+        ), {"t": CO_MAJ}).fetchall()]
+
+        sel_parts = ["ST.[ST_CD]"]
+        for c in co_cols:
+            if c.upper() not in ("ST_CD", "UPLOAD_DATETIME"):
+                sel_parts.append(f"CO.[{c}]")
+
+        _run(conn, f"""
+            SELECT {', '.join(sel_parts)}
+            INTO [{CALC}]
+            FROM [{ST_MAST}] ST WITH (NOLOCK)
+            CROSS JOIN [{CO_MAJ}] CO WITH (NOLOCK)
+            WHERE ST.[ST_CD] IS NOT NULL
+        """)
+        cnt = conn.execute(text(f"SELECT COUNT(*) FROM [{CALC}]")).scalar()
+        steps.append({"step": "Create calc (CO base)", "detail": f"{cnt} rows from {CO_MAJ} × {ST_MAST}", "status": "ok"})
+    else:
+        # Fallback: copy ST_MAJ_CAT directly
+        _run(conn, f"SELECT * INTO [{CALC}] FROM [{ST_MAJ}] WITH (NOLOCK)")
+        cnt = conn.execute(text(f"SELECT COUNT(*) FROM [{CALC}]")).scalar()
+        steps.append({"step": "Create calc (ST only)", "detail": f"{cnt} rows from {ST_MAJ}", "status": "ok"})
+
+    # Ensure output columns
     _ensure_col(conn, CALC, COL_SAL_D)
     _ensure_col(conn, CALC, COL_SAL_PD)
     _ensure_col(conn, CALC, COL_SRC, "NVARCHAR(50)")
 
-    cnt = conn.execute(text(f"SELECT COUNT(*) FROM [{CALC}]")).scalar()
-    steps.append({"step": "Create calc table", "detail": f"{cnt} rows from {SRC} → {CALC} (+ {COL_SAL_D}, {COL_SAL_PD})", "status": "ok"})
     return True
 
 
 # ==========================================================================
-# STEP 2: MERGE CO_MAJ_CAT VALUES
+# STEP 1b: FILL GAPS — ensure every CO_MAJ_CAT × store exists in CALC
 # ==========================================================================
-# For columns where CO_MAJ_CAT has values → apply to ALL stores.
-# If ST_MAJ_CAT also has values → take MAX of both.
+def _step_fill_co_gaps(conn, steps):
+    """Insert missing (ST_CD, MAJ_CAT) rows from CO_MAJ_CAT × ST_MASTER.
 
-# Columns to merge from CO_MAJ_CAT with MAX logic
-# ==========================================================================
-# MERGE RULES — Easy to change per column
-# ==========================================================================
-# "co_override"  = CO always wins. Applies to all stores.
-# "max"          = MAX of ST and CO values. If only one has data, use that.
-#
-# Add/remove/change rules here:
-MERGE_RULES = {
-    #  Column               Rule            Note
-    COL_LISTING:          "co_override",  # CO top priority. If CO says N → all stores get 0
-    COL_I_ROD:            "co_override",  # CO top priority. If CO has data → all stores same
-    COL_MANUAL_MBQ:       "max",          # MAX of ST vs CO
-    COL_DISP_GR_DGR:      "max",          # MAX of ST vs CO
-    COL_LW_ACT_GR:        "max",          # MAX of ST vs CO
-    COL_BGT_SL_GR:        "max",          # MAX of ST vs CO
-    COL_CLR_MIN:          "max",          # MAX of ST vs CO
-    COL_CLR_MAX:          "max",          # MAX of ST vs CO
-    COL_DPN:              "max",          # MAX of ST vs CO
-    "CONT":               "st_first",     # ST first, CO fallback if ST is NULL/0
-}
-
-
-def _step_merge_co_values(conn, steps):
+    After Step 1 (which may have used ST fallback), cross-check:
+      for each store in ST_MASTER × each MAJ_CAT in CO_MAJ_CAT,
+      if the combo is missing in CALC → insert with CO defaults.
+    This guarantees complete coverage even if ST_MAJ_CAT had fewer MAJ_CATs.
     """
-    Merge CO_MAJ_CAT values into calc table using MERGE_RULES above.
+    CALC    = TABLES["CALC"]
+    CO_MAJ  = TABLES["CO_MAJ"]
+    ST_MAST = TABLES["ST_MAST"]
 
-    co_override = CO always wins → applies to ALL stores for that MAJ_CAT
-    max         = MAX(ST value, CO value) → whichever is higher
-    """
-    CALC   = TABLES["CALC"]
-    CO_MAJ = TABLES["CO_MAJ"]
-    if not _exists(conn, CO_MAJ):
-        steps.append({"step": "Merge CO_MAJ_CAT", "detail": "Table not found", "status": "skip"})
+    if not _exists(conn, CO_MAJ) or not _exists(conn, ST_MAST):
         return
 
-    merged = []
-    for col, rule in MERGE_RULES.items():
-        if not _col_exists(conn, CO_MAJ, col) or not _col_exists(conn, CALC, col):
+    try:
+        # Get CALC columns + CO columns for building the INSERT
+        calc_cols_list = [r[0] for r in conn.execute(text(
+            "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
+            "WHERE TABLE_NAME = :t ORDER BY ORDINAL_POSITION"
+        ), {"t": CALC}).fetchall()]
+        co_cols = {r[0].upper(): r[0] for r in conn.execute(text(
+            "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = :t"
+        ), {"t": CO_MAJ}).fetchall()}
+
+        # Build SELECT: ST_CD from stores, CO values for matching cols, NULL for the rest
+        ins_sel = []
+        for c in calc_cols_list:
+            cu = c.upper()
+            if cu == "ST_CD":
+                ins_sel.append("ST.[ST_CD]")
+            elif cu == "MAJ_CAT" and "MAJ_CAT" in co_cols:
+                ins_sel.append(f"CO.[{co_cols['MAJ_CAT']}]")
+            elif cu in co_cols:
+                ins_sel.append(f"CO.[{co_cols[cu]}]")
+            else:
+                ins_sel.append("NULL")
+
+        before = conn.execute(text(f"SELECT COUNT(*) FROM [{CALC}]")).scalar()
+        _run(conn, f"""
+            INSERT INTO [{CALC}] ({', '.join(f'[{c}]' for c in calc_cols_list)})
+            SELECT {', '.join(ins_sel)}
+            FROM [{ST_MAST}] ST WITH (NOLOCK)
+            CROSS JOIN [{CO_MAJ}] CO WITH (NOLOCK)
+            WHERE ST.[ST_CD] IS NOT NULL
+              AND NOT EXISTS (
+                  SELECT 1 FROM [{CALC}] C
+                  WHERE C.[ST_CD] = ST.[ST_CD] AND C.[MAJ_CAT] = CO.[MAJ_CAT]
+              )
+        """)
+        after = conn.execute(text(f"SELECT COUNT(*) FROM [{CALC}]")).scalar()
+        gap_rows = after - before
+        if gap_rows > 0:
+            steps.append({"step": "Fill CO gaps", "detail": f"{gap_rows} missing (store × MAJ_CAT) rows added from {CO_MAJ}", "status": "ok"})
+        else:
+            steps.append({"step": "Fill CO gaps", "detail": "No gaps — all CO × store combos present", "status": "ok"})
+    except Exception as e:
+        steps.append({"step": "Fill CO gaps", "detail": str(e)[:150], "status": "error"})
+
+
+# ==========================================================================
+# STEP 2: OVERLAY ST_MAJ_CAT VALUES (ST overrides CO base)
+# ==========================================================================
+def _step_overlay_st_values(conn, steps):
+    """Cascade: CO provides defaults (step 1) → ST overrides per-store.
+
+    For ALL matching columns between ST_MAJ_CAT and CALC:
+      - If ST has data (non-null, non-empty) → use ST value
+      - If ST has no data → keep CO base value from step 1
+
+    Example: CO has I_ROD=2 → all stores get 2.
+             Store X has I_ROD=3 in ST → store X gets 3 (not 2).
+
+    Also: inserts ST rows for (ST_CD, MAJ_CAT) combos not in CALC
+    (MAJ_CATs that exist in ST but not in CO).
+    """
+    CALC   = TABLES["CALC"]
+    ST_MAJ = TABLES["ST_MAJ"]
+
+    if not _exists(conn, ST_MAJ):
+        steps.append({"step": "Overlay ST_MAJ_CAT", "detail": f"{ST_MAJ} not found", "status": "skip"})
+        return
+
+    # ── Column discovery ─────────────────────────────────────────
+    calc_cols = {r[0].upper(): r[0] for r in conn.execute(text(
+        "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = :t"
+    ), {"t": CALC}).fetchall()}
+
+    st_cols = {r[0].upper(): r[0] for r in conn.execute(text(
+        "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = :t"
+    ), {"t": ST_MAJ}).fetchall()}
+
+    skip = {"ST_CD", "MAJ_CAT", "UPLOAD_DATETIME",
+            COL_SAL_D.upper(), COL_SAL_PD.upper(), COL_SRC.upper()}
+
+    # ── Add columns that exist in ST but not yet in CALC ─────────
+    added_cols = []
+    for cu, c_actual in st_cols.items():
+        if cu not in skip and cu not in calc_cols:
+            _ensure_col(conn, CALC, c_actual)
+            calc_cols[cu] = c_actual
+            added_cols.append(c_actual)
+    if added_cols:
+        steps.append({"step": "Add ST columns", "detail": f"{len(added_cols)} cols: {', '.join(added_cols)}", "status": "ok"})
+
+    # ── Insert ST-only rows (MAJ_CATs not in CO) ─────────────────
+    try:
+        before = conn.execute(text(f"SELECT COUNT(*) FROM [{CALC}]")).scalar()
+        all_calc = [r[0] for r in conn.execute(text(
+            "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
+            "WHERE TABLE_NAME = :t ORDER BY ORDINAL_POSITION"
+        ), {"t": CALC}).fetchall()]
+
+        ins_sel = []
+        for c in all_calc:
+            cu = c.upper()
+            ins_sel.append(f"S.[{st_cols[cu]}]" if cu in st_cols else "NULL")
+
+        _run(conn, f"""
+            INSERT INTO [{CALC}] ({', '.join(f'[{c}]' for c in all_calc)})
+            SELECT {', '.join(ins_sel)}
+            FROM [{ST_MAJ}] S WITH (NOLOCK)
+            WHERE NOT EXISTS (
+                SELECT 1 FROM [{CALC}] C
+                WHERE C.[ST_CD] = S.[ST_CD] AND C.[MAJ_CAT] = S.[MAJ_CAT]
+            )
+        """)
+        after = conn.execute(text(f"SELECT COUNT(*) FROM [{CALC}]")).scalar()
+        new_rows = after - before
+        if new_rows > 0:
+            steps.append({"step": "Insert ST-only rows", "detail": f"{new_rows} rows (MAJ_CATs not in CO)", "status": "ok"})
+    except Exception as e:
+        steps.append({"step": "Insert ST-only rows", "detail": str(e)[:150], "status": "error"})
+
+    # ── Overlay: UPDATE all matching columns with ST values ──────
+    overlaid = []
+    for cu, st_actual in st_cols.items():
+        if cu in skip or cu not in calc_cols:
             continue
-
+        calc_actual = calc_cols[cu]
         try:
-            if rule == "co_override":
-                # ── CO ALWAYS WINS: if CO has data → overwrite ALL stores ──
-                _run(conn, f"""
-                    UPDATE C SET C.[{col}] = CO.[{col}]
-                    FROM [{CALC}] C
-                    INNER JOIN [{CO_MAJ}] CO WITH (NOLOCK) ON C.[MAJ_CAT] = CO.[MAJ_CAT]
-                    WHERE CO.[{col}] IS NOT NULL
-                """)
-                merged.append(f"{col} (CO override)")
-
-            elif rule == "max":
-                # ── MAX: take higher of ST and CO ──────────────────────────
-                _run(conn, f"""
-                    UPDATE C SET C.[{col}] =
-                        CASE
-                            WHEN ISNULL(C.[{col}],0) >= ISNULL(CO.[{col}],0) THEN C.[{col}]
-                            ELSE CO.[{col}]
-                        END
-                    FROM [{CALC}] C
-                    INNER JOIN [{CO_MAJ}] CO WITH (NOLOCK) ON C.[MAJ_CAT] = CO.[MAJ_CAT]
-                    WHERE CO.[{col}] IS NOT NULL AND CO.[{col}] > 0
-                """)
-                merged.append(f"{col} (MAX)")
-
-            elif rule == "st_first":
-                # ── ST FIRST: use ST value, CO fallback if ST is NULL/0 ────
-                _ensure_col(conn, CALC, col)
-                _run(conn, f"""
-                    UPDATE C SET C.[{col}] = CO.[{col}]
-                    FROM [{CALC}] C
-                    INNER JOIN [{CO_MAJ}] CO WITH (NOLOCK) ON C.[MAJ_CAT] = CO.[MAJ_CAT]
-                    WHERE (C.[{col}] IS NULL OR TRY_CAST(C.[{col}] AS FLOAT) = 0)
-                      AND CO.[{col}] IS NOT NULL AND TRY_CAST(CO.[{col}] AS FLOAT) > 0
-                """)
-                merged.append(f"{col} (ST first, CO fallback)")
-
+            _run(conn, f"""
+                UPDATE C SET C.[{calc_actual}] = S.[{st_actual}]
+                FROM [{CALC}] C
+                INNER JOIN [{ST_MAJ}] S WITH (NOLOCK)
+                    ON C.[ST_CD] = S.[ST_CD] AND C.[MAJ_CAT] = S.[MAJ_CAT]
+                WHERE S.[{st_actual}] IS NOT NULL
+                  AND LTRIM(RTRIM(CAST(S.[{st_actual}] AS NVARCHAR(MAX)))) NOT IN ('', '0')
+            """)
+            overlaid.append(calc_actual)
         except Exception as e:
-            steps.append({"step": f"Merge CO {col}", "detail": str(e)[:100], "status": "error"})
+            steps.append({"step": f"Overlay {calc_actual}", "detail": str(e)[:100], "status": "error"})
 
-    steps.append({"step": "Merge CO_MAJ_CAT", "detail": f"{len(merged)} cols: {', '.join(merged)}", "status": "ok"})
+    steps.append({"step": "Overlay ST_MAJ_CAT",
+                  "detail": f"{len(overlaid)} cols overridden: {', '.join(overlaid)}", "status": "ok"})
 
 
 # ==========================================================================
@@ -228,7 +333,7 @@ def _step_defaults(conn, steps):
     CALC = TABLES["CALC"]
     applied = []
 
-    # 1. LISTING: blank or 'Y' → 1, 'N' → 0
+    # 1. LISTING: blank/Y/null → 1, N → 0
     if _col_exists(conn, CALC, COL_LISTING):
         try:
             _run(conn, f"""
@@ -241,11 +346,11 @@ def _step_defaults(conn, steps):
                         ELSE 1
                     END
             """)
-            applied.append(f"{COL_LISTING}: blank/Y→1, N→0")
+            applied.append(f"{COL_LISTING}: blank/Y/null→1, N→0")
         except Exception as e:
             steps.append({"step": f"Default {COL_LISTING}", "detail": str(e)[:100], "status": "error"})
 
-    # 2. I_ROD: blank or 0 → default 1
+    # 2. I_ROD: null/0 → 1
     if _col_exists(conn, CALC, COL_I_ROD):
         try:
             _run(conn, f"UPDATE [{CALC}] SET [{COL_I_ROD}] = 1 WHERE [{COL_I_ROD}] IS NULL OR [{COL_I_ROD}] = 0")
@@ -253,7 +358,7 @@ def _step_defaults(conn, steps):
         except Exception as e:
             logger.debug(f"Default {COL_I_ROD}: {e}")
 
-    # 3. Growth rates: DISP_GR_DGR, LW_ACT_SL_GR_DGR, BGT_SL_GR_DGR → default 1 if null/blank
+    # 3. Growth rates: DISP_GR_DGR, LW_ACT_SL_GR_DGR, BGT_SL_GR_DGR → default 1 if null/0
     for col in [COL_DISP_GR_DGR, COL_LW_ACT_GR, COL_BGT_SL_GR]:
         if _col_exists(conn, CALC, col):
             try:
@@ -262,11 +367,11 @@ def _step_defaults(conn, steps):
             except Exception as e:
                 logger.debug(f"Default {col}: {e}")
 
-    # 4. MANUAL_MBQ: keep only >0 values, null the rest
+    # 4. MANUAL_MBQ: ≤0/null → 0
     if _col_exists(conn, CALC, COL_MANUAL_MBQ):
         try:
-            _run(conn, f"UPDATE [{CALC}] SET [{COL_MANUAL_MBQ}] = NULL WHERE [{COL_MANUAL_MBQ}] IS NULL OR [{COL_MANUAL_MBQ}] <= 0")
-            applied.append(f"{COL_MANUAL_MBQ}: <=0→NULL")
+            _run(conn, f"UPDATE [{CALC}] SET [{COL_MANUAL_MBQ}] = 0 WHERE [{COL_MANUAL_MBQ}] IS NULL OR [{COL_MANUAL_MBQ}] <= 0")
+            applied.append(f"{COL_MANUAL_MBQ}: ≤0/null→0")
         except Exception as e:
             logger.debug(f"Default {COL_MANUAL_MBQ}: {e}")
 
@@ -373,35 +478,19 @@ def _step_sal_pd(conn, steps):
 
 # ==========================================================================
 # ARS_CALC_ST_ART — Article-level calc table
-# Same pattern as ST_MAJ_CAT but at GEN_ART level
-# Sources: Master_ALC_INPUT_ST_ART, MASTER_ALC_INPUT_CO_ART, MASTER_GEN_ART_SALE
+# Cascade: CO_ART × stores (base) → ST_ART overlay (same as MAJ_CAT)
+# Sources: MASTER_ALC_INPUT_CO_ART, Master_ALC_INPUT_ST_ART, MASTER_GEN_ART_SALE
 # ==========================================================================
 
 ART_TABLES = {
     "ST_ART":   "Master_ALC_INPUT_ST_ART",
     "CO_ART":   "MASTER_ALC_INPUT_CO_ART",
-    "ART_SALE": "MASTER_GEN_ART_SALE",          # used SEPARATELY for SAL_PD only
+    "ART_SALE": "MASTER_GEN_ART_SALE",
     "CALC_ART": "ARS_CALC_ST_ART",
 }
 
-# ==========================================================================
-# ART-LEVEL MERGE RULES — mirrors MAJ_CAT rules
-# ==========================================================================
-# Rule: if CO has value → use CO (company), else keep ST (store) value.
-#   "co_override"  : CO always wins if CO value is not NULL
-#   "max"          : MAX(ST value, CO value)
-#   "st_first"     : ST wins, CO used only when ST is NULL/0
-# ==========================================================================
-ART_MERGE_RULES = {
-    "LISTING":         "co_override",
-    "I_ROD":           "co_override",
-    "MANUAL_MBQ":      "max",
-    "FOCUS_W_CAP":     "co_override",
-    "FOCUS_WO_CAP":    "co_override",
-    "CORE":            "co_override",
-    "AUTO":            "co_override",
-    "HH_ART":          "co_override",
-}
+# Columns to DROP from ART calc (not needed at article level)
+_ART_DROP_COLS = {"CORE", "AUTO", "HH_ART"}
 
 # Article key column: CO_ART uses "10_DIGIT" (= GEN_ART_NUMBER)
 _ART_KEY_ALIASES = ["GEN_ART_NUMBER", "10_DIGIT", "ART_NUMBER", "ARTICLE_NUMBER"]
@@ -419,49 +508,75 @@ def _find_art_key(conn, table: str):
     return None
 
 
+def _step_ensure_sale_maj_cat(conn, steps):
+    """Ensure MAJ_CAT exists in MASTER_GEN_ART_SALE (populate from vw_master_product)."""
+    SALE_T = ART_TABLES["ART_SALE"]
+    if not _exists(conn, SALE_T):
+        return
+
+    sale_cols = {r[0].upper() for r in conn.execute(text(
+        "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = :t"
+    ), {"t": SALE_T}).fetchall()}
+
+    if "MAJ_CAT" in sale_cols:
+        return  # already present
+
+    if not _exists(conn, "vw_master_product"):
+        steps.append({"step": "SALE MAJ_CAT", "detail": "vw_master_product not found", "status": "skip"})
+        return
+
+    try:
+        _ensure_col(conn, SALE_T, "MAJ_CAT", "NVARCHAR(200)")
+        _run(conn, f"""
+            UPDATE S SET S.[MAJ_CAT] = MP.[MAJ_CAT]
+            FROM [{SALE_T}] S
+            INNER JOIN (
+                SELECT [ARTICLE_NUMBER], MIN([MAJ_CAT]) AS [MAJ_CAT]
+                FROM [vw_master_product] WITH (NOLOCK)
+                WHERE [MAJ_CAT] IS NOT NULL
+                GROUP BY [ARTICLE_NUMBER]
+            ) MP ON TRY_CAST(S.[GEN_ART_NUMBER] AS BIGINT) = TRY_CAST(MP.[ARTICLE_NUMBER] AS BIGINT)
+            WHERE S.[MAJ_CAT] IS NULL
+        """)
+        filled = conn.execute(text(f"SELECT COUNT(*) FROM [{SALE_T}] WHERE [MAJ_CAT] IS NOT NULL")).scalar()
+        steps.append({"step": "SALE MAJ_CAT", "detail": f"MAJ_CAT added to {SALE_T} from vw_master_product ({filled} rows)", "status": "ok"})
+    except Exception as e:
+        steps.append({"step": "SALE MAJ_CAT", "detail": str(e)[:150], "status": "error"})
+
+
 def _step_create_calc_art(conn, steps):
-    """Step A1: Copy Master_ALC_INPUT_ST_ART → ARS_CALC_ST_ART (mirrors MAJ_CAT flow).
+    """Step A1: CO_ART × all stores → ARS_CALC_ST_ART (base layer).
 
-    If ST_ART is empty, falls back to synthesizing a base from
-    (active stores) × (CO_ART rows) so every store gets the company-level
-    article definitions.
+    Every store gets CO-level article values as a starting point.
+    Falls back to copying ST_ART directly if CO_ART is missing.
+    Drops CORE, AUTO, HH_ART columns (not needed at article level).
     """
-    SRC    = ART_TABLES["ST_ART"]
-    CO_ART = ART_TABLES["CO_ART"]
-    CALC   = ART_TABLES["CALC_ART"]
+    CO_ART  = ART_TABLES["CO_ART"]
+    ST_ART  = ART_TABLES["ST_ART"]
+    ST_MAST = TABLES["ST_MAST"]
+    CALC    = ART_TABLES["CALC_ART"]
 
-    if not _exists(conn, SRC) and not _exists(conn, CO_ART):
-        steps.append({"step": "Create ART calc", "detail": "Neither ST_ART nor CO_ART found", "status": "skip"})
+    has_co   = _exists(conn, CO_ART)
+    has_st   = _exists(conn, ST_ART)
+    has_mast = _exists(conn, ST_MAST)
+
+    if not has_co and not has_st:
+        steps.append({"step": "Create ART calc", "detail": "Neither CO_ART nor ST_ART found", "status": "skip"})
         return False
 
     _run(conn, f"IF OBJECT_ID('{CALC}','U') IS NOT NULL DROP TABLE [{CALC}]")
 
-    # Try ST_ART first
-    st_count = 0
-    if _exists(conn, SRC):
-        st_count = conn.execute(text(f"SELECT COUNT(*) FROM [{SRC}]")).scalar() or 0
-
-    if st_count > 0:
-        _run(conn, f"SELECT * INTO [{CALC}] FROM [{SRC}] WITH (NOLOCK)")
-        src_label = SRC
-    else:
-        # ST_ART is empty → synthesize from stores × CO_ART (company defaults apply to all stores)
-        if not _exists(conn, CO_ART):
-            steps.append({"step": "Create ART calc", "detail": f"{SRC} empty and {CO_ART} missing", "status": "skip"})
-            return False
-
+    if has_co and has_mast:
         co_key = _find_art_key(conn, CO_ART)
         if not co_key:
             steps.append({"step": "Create ART calc", "detail": f"No article key in {CO_ART}", "status": "skip"})
             return False
 
-        ST_MAST = TABLES["ST_MAST"]
         co_cols = [r[0] for r in conn.execute(text(
             "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = :t"
         ), {"t": CO_ART}).fetchall()]
         co_cols_upper = {c.upper(): c for c in co_cols}
 
-        # Build select list from CO_ART; rename 10_DIGIT → GEN_ART_NUMBER
         sel_parts = ["ST.[ST_CD]"]
         if "MAJ_CAT" in co_cols_upper:
             sel_parts.append(f"CO.[{co_cols_upper['MAJ_CAT']}] AS [MAJ_CAT]")
@@ -469,10 +584,9 @@ def _step_create_calc_art(conn, steps):
         if "CLR" in co_cols_upper:
             sel_parts.append(f"CO.[{co_cols_upper['CLR']}] AS [CLR]")
 
-        # Add all other CO_ART cols (except the keys we already handled)
-        handled = {"MAJ_CAT", co_key.upper(), "CLR"}
+        handled = {"ST_CD", "MAJ_CAT", co_key.upper(), "CLR", "UPLOAD_DATETIME"} | _ART_DROP_COLS
         for c in co_cols:
-            if c.upper() not in handled and c.upper() != "UPLOAD_DATETIME":
+            if c.upper() not in handled:
                 sel_parts.append(f"CO.[{c}]")
 
         _run(conn, f"""
@@ -482,123 +596,286 @@ def _step_create_calc_art(conn, steps):
             CROSS JOIN [{CO_ART}] CO WITH (NOLOCK)
             WHERE ST.[ST_CD] IS NOT NULL
         """)
-        src_label = f"{CO_ART} × {ST_MAST} (ST_ART was empty)"
+        cnt = conn.execute(text(f"SELECT COUNT(*) FROM [{CALC}]")).scalar()
+        steps.append({"step": "Create ART calc (CO base)", "detail": f"{cnt} rows from {CO_ART} × {ST_MAST}", "status": "ok"})
+    elif has_st:
+        _run(conn, f"SELECT * INTO [{CALC}] FROM [{ST_ART}] WITH (NOLOCK)")
+        # Drop unwanted columns
+        for dc in _ART_DROP_COLS:
+            if _col_exists(conn, CALC, dc):
+                try:
+                    _run(conn, f"ALTER TABLE [{CALC}] DROP COLUMN [{dc}]")
+                except Exception:
+                    pass
+        cnt = conn.execute(text(f"SELECT COUNT(*) FROM [{CALC}]")).scalar()
+        steps.append({"step": "Create ART calc (ST only)", "detail": f"{cnt} rows from {ST_ART}", "status": "ok"})
+    else:
+        steps.append({"step": "Create ART calc", "detail": "No valid source", "status": "skip"})
+        return False
 
-    # Ensure output cols
     _ensure_col(conn, CALC, "SAL_D")
     _ensure_col(conn, CALC, "SAL_PD")
     _ensure_col(conn, CALC, "SALE_COVER_SRC", "NVARCHAR(50)")
 
-    cnt = conn.execute(text(f"SELECT COUNT(*) FROM [{CALC}]")).scalar()
-    steps.append({"step": "Create ART calc", "detail": f"{cnt} rows from {src_label}", "status": "ok"})
     return True
 
 
-def _step_merge_co_art(conn, steps):
-    """Step A2: Merge MASTER_ALC_INPUT_CO_ART values into ARS_CALC_ST_ART.
+def _step_fill_co_art_gaps(conn, steps):
+    """Step A1b: Ensure every CO_ART × store exists in ARS_CALC_ST_ART."""
+    CALC    = ART_TABLES["CALC_ART"]
+    CO_ART  = ART_TABLES["CO_ART"]
+    ST_MAST = TABLES["ST_MAST"]
 
-    CO_ART is company-level (no ST_CD) → applies to ALL stores for that article.
-    Join keys detected dynamically — CO_ART uses '10_DIGIT' = GEN_ART_NUMBER.
+    if not _exists(conn, CO_ART) or not _exists(conn, ST_MAST):
+        return
+
+    co_key = _find_art_key(conn, CO_ART)
+    if not co_key:
+        return
+
+    try:
+        calc_cols_list = [r[0] for r in conn.execute(text(
+            "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
+            "WHERE TABLE_NAME = :t ORDER BY ORDINAL_POSITION"
+        ), {"t": CALC}).fetchall()]
+
+        co_cols = {r[0].upper(): r[0] for r in conn.execute(text(
+            "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = :t"
+        ), {"t": CO_ART}).fetchall()}
+
+        ins_sel = []
+        for c in calc_cols_list:
+            cu = c.upper()
+            if cu == "ST_CD":
+                ins_sel.append("ST.[ST_CD]")
+            elif cu == "GEN_ART_NUMBER":
+                ins_sel.append(f"TRY_CAST(CO.[{co_key}] AS BIGINT)")
+            elif cu in co_cols:
+                ins_sel.append(f"CO.[{co_cols[cu]}]")
+            else:
+                ins_sel.append("NULL")
+
+        # Build NOT EXISTS join — match on ST_CD + MAJ_CAT + GEN_ART_NUMBER [+ CLR]
+        exist_parts = ["C.[ST_CD] = ST.[ST_CD]",
+                       f"C.[GEN_ART_NUMBER] = TRY_CAST(CO.[{co_key}] AS BIGINT)"]
+        if "MAJ_CAT" in co_cols and "MAJ_CAT" in {c.upper() for c in calc_cols_list}:
+            exist_parts.append("C.[MAJ_CAT] = CO.[MAJ_CAT]")
+        if "CLR" in co_cols and "CLR" in {c.upper() for c in calc_cols_list}:
+            exist_parts.append("C.[CLR] = CO.[CLR]")
+        exist_cond = " AND ".join(exist_parts)
+
+        before = conn.execute(text(f"SELECT COUNT(*) FROM [{CALC}]")).scalar()
+        _run(conn, f"""
+            INSERT INTO [{CALC}] ({', '.join(f'[{c}]' for c in calc_cols_list)})
+            SELECT {', '.join(ins_sel)}
+            FROM [{ST_MAST}] ST WITH (NOLOCK)
+            CROSS JOIN [{CO_ART}] CO WITH (NOLOCK)
+            WHERE ST.[ST_CD] IS NOT NULL
+              AND NOT EXISTS (SELECT 1 FROM [{CALC}] C WHERE {exist_cond})
+        """)
+        after = conn.execute(text(f"SELECT COUNT(*) FROM [{CALC}]")).scalar()
+        gap_rows = after - before
+        if gap_rows > 0:
+            steps.append({"step": "Fill CO_ART gaps", "detail": f"{gap_rows} missing (store × article) rows added", "status": "ok"})
+        else:
+            steps.append({"step": "Fill CO_ART gaps", "detail": "No gaps — all CO_ART × store combos present", "status": "ok"})
+    except Exception as e:
+        steps.append({"step": "Fill CO_ART gaps", "detail": str(e)[:150], "status": "error"})
+
+
+def _step_overlay_st_art(conn, steps):
+    """Step A2: Overlay ST_ART values — ST overrides CO base where ST has data.
+
+    Same cascade as MAJ_CAT: auto-detects ALL matching columns,
+    inserts ST-only rows, overlays non-null/non-blank ST values.
+    Skips CORE, AUTO, HH_ART columns.
     """
     CALC   = ART_TABLES["CALC_ART"]
-    CO_ART = ART_TABLES["CO_ART"]
-    if not _exists(conn, CO_ART):
-        steps.append({"step": "Merge CO_ART", "detail": "Table not found", "status": "skip"})
+    ST_ART = ART_TABLES["ST_ART"]
+
+    if not _exists(conn, ST_ART):
+        steps.append({"step": "Overlay ST_ART", "detail": f"{ST_ART} not found", "status": "skip"})
         return
 
-    co_cols = [r[0] for r in conn.execute(text(
+    calc_cols = {r[0].upper(): r[0] for r in conn.execute(text(
         "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = :t"
-    ), {"t": CO_ART}).fetchall()]
-    co_cols_upper = {c.upper(): c for c in co_cols}
+    ), {"t": CALC}).fetchall()}
 
-    co_art_key = _find_art_key(conn, CO_ART)
-    if not co_art_key:
-        steps.append({"step": "Merge CO_ART", "detail": "No article key found in CO_ART", "status": "skip"})
-        return
+    st_cols = {r[0].upper(): r[0] for r in conn.execute(text(
+        "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = :t"
+    ), {"t": ST_ART}).fetchall()}
 
-    # Build join condition: MAJ_CAT (if present) + article key, CLR (if present on both sides)
-    join_parts = [f"C.[GEN_ART_NUMBER] = TRY_CAST(CO.[{co_art_key}] AS BIGINT)"]
-    if "MAJ_CAT" in co_cols_upper:
-        join_parts.insert(0, "C.[MAJ_CAT] = CO.[MAJ_CAT]")
-    if "CLR" in co_cols_upper and _col_exists(conn, CALC, "CLR"):
-        # CLR match only when CO specifies it; NULL CLR in CO = applies to all colors
-        join_parts.append("(CO.[CLR] IS NULL OR C.[CLR] = CO.[CLR])")
+    st_art_key = _find_art_key(conn, ST_ART) or "GEN_ART_NUMBER"
+    skip = {"ST_CD", "MAJ_CAT", "GEN_ART_NUMBER", st_art_key.upper(),
+            "CLR", "UPLOAD_DATETIME", "SAL_D", "SAL_PD", "SALE_COVER_SRC"} | _ART_DROP_COLS
+
+    # ── Add ST-only columns to CALC (excluding dropped cols) ─────
+    added_cols = []
+    for cu, c_actual in st_cols.items():
+        if cu not in skip and cu not in calc_cols:
+            _ensure_col(conn, CALC, c_actual)
+            calc_cols[cu] = c_actual
+            added_cols.append(c_actual)
+    if added_cols:
+        steps.append({"step": "Add ST_ART columns", "detail": f"{len(added_cols)} cols: {', '.join(added_cols)}", "status": "ok"})
+
+    # ── Build join condition ──────────────────────────────────────
+    join_parts = ["C.[ST_CD] = S.[ST_CD]"]
+    if "MAJ_CAT" in st_cols and "MAJ_CAT" in calc_cols:
+        join_parts.append("C.[MAJ_CAT] = S.[MAJ_CAT]")
+    join_parts.append(f"C.[GEN_ART_NUMBER] = TRY_CAST(S.[{st_art_key}] AS BIGINT)")
+    if "CLR" in st_cols and "CLR" in calc_cols:
+        join_parts.append("C.[CLR] = S.[CLR]")
     join_cond = " AND ".join(join_parts)
 
-    merged = []
-    for col, rule in ART_MERGE_RULES.items():
-        if col.upper() not in co_cols_upper:
+    # ── Insert ST-only rows (articles not in CO) ─────────────────
+    try:
+        before = conn.execute(text(f"SELECT COUNT(*) FROM [{CALC}]")).scalar()
+        all_calc = [r[0] for r in conn.execute(text(
+            "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
+            "WHERE TABLE_NAME = :t ORDER BY ORDINAL_POSITION"
+        ), {"t": CALC}).fetchall()]
+
+        ins_sel = []
+        for c in all_calc:
+            cu = c.upper()
+            if cu == "GEN_ART_NUMBER" and st_art_key.upper() != "GEN_ART_NUMBER":
+                ins_sel.append(f"TRY_CAST(S.[{st_art_key}] AS BIGINT)")
+            elif cu in st_cols:
+                ins_sel.append(f"S.[{st_cols[cu]}]")
+            else:
+                ins_sel.append("NULL")
+
+        _run(conn, f"""
+            INSERT INTO [{CALC}] ({', '.join(f'[{c}]' for c in all_calc)})
+            SELECT {', '.join(ins_sel)}
+            FROM [{ST_ART}] S WITH (NOLOCK)
+            WHERE NOT EXISTS (SELECT 1 FROM [{CALC}] C WHERE {join_cond})
+        """)
+        after = conn.execute(text(f"SELECT COUNT(*) FROM [{CALC}]")).scalar()
+        new_rows = after - before
+        if new_rows > 0:
+            steps.append({"step": "Insert ST_ART-only rows", "detail": f"{new_rows} rows (articles not in CO)", "status": "ok"})
+    except Exception as e:
+        steps.append({"step": "Insert ST_ART-only rows", "detail": str(e)[:150], "status": "error"})
+
+    # ── Overlay: UPDATE all matching columns with ST values ──────
+    overlaid = []
+    for cu, st_actual in st_cols.items():
+        if cu in skip or cu not in calc_cols:
             continue
-        actual_co_col = co_cols_upper[col.upper()]
-        if not _col_exists(conn, CALC, col):
-            # Add column to CALC if missing (text cols as NVARCHAR, else FLOAT)
-            dtype = "NVARCHAR(50)" if col.upper() in ("LISTING","I_ROD","CORE","AUTO","HH_ART","FOCUS_W_CAP","FOCUS_WO_CAP") else "FLOAT"
-            _ensure_col(conn, CALC, col, dtype)
-
+        calc_actual = calc_cols[cu]
         try:
-            if rule == "co_override":
-                _run(conn, f"""
-                    UPDATE C SET C.[{col}] = CO.[{actual_co_col}]
-                    FROM [{CALC}] C
-                    INNER JOIN [{CO_ART}] CO WITH (NOLOCK) ON {join_cond}
-                    WHERE CO.[{actual_co_col}] IS NOT NULL
-                """)
-            elif rule == "max":
-                _run(conn, f"""
-                    UPDATE C SET C.[{col}] =
-                        CASE WHEN ISNULL(TRY_CAST(C.[{col}] AS FLOAT), 0)
-                              >= ISNULL(TRY_CAST(CO.[{actual_co_col}] AS FLOAT), 0)
-                             THEN C.[{col}] ELSE CO.[{actual_co_col}] END
-                    FROM [{CALC}] C
-                    INNER JOIN [{CO_ART}] CO WITH (NOLOCK) ON {join_cond}
-                    WHERE CO.[{actual_co_col}] IS NOT NULL
-                """)
-            elif rule == "st_first":
-                _run(conn, f"""
-                    UPDATE C SET C.[{col}] = CO.[{actual_co_col}]
-                    FROM [{CALC}] C
-                    INNER JOIN [{CO_ART}] CO WITH (NOLOCK) ON {join_cond}
-                    WHERE (C.[{col}] IS NULL OR ISNULL(TRY_CAST(C.[{col}] AS FLOAT), 0) = 0)
-                      AND CO.[{actual_co_col}] IS NOT NULL
-                """)
-            merged.append(f"{col}({rule})")
+            _run(conn, f"""
+                UPDATE C SET C.[{calc_actual}] = S.[{st_actual}]
+                FROM [{CALC}] C
+                INNER JOIN [{ST_ART}] S WITH (NOLOCK) ON {join_cond}
+                WHERE S.[{st_actual}] IS NOT NULL
+                  AND LTRIM(RTRIM(CAST(S.[{st_actual}] AS NVARCHAR(MAX)))) NOT IN ('', '0')
+            """)
+            overlaid.append(calc_actual)
         except Exception as e:
-            steps.append({"step": f"Merge CO_ART {col}", "detail": str(e)[:100], "status": "error"})
+            steps.append({"step": f"Overlay ART {calc_actual}", "detail": str(e)[:100], "status": "error"})
 
-    steps.append({"step": "Merge CO_ART", "detail": f"{len(merged)} cols: {', '.join(merged)}", "status": "ok"})
+    steps.append({"step": "Overlay ST_ART",
+                  "detail": f"{len(overlaid)} cols overridden: {', '.join(overlaid)}", "status": "ok"})
+
+
+def _step_art_defaults(conn, steps):
+    """Apply default values for ARS_CALC_ST_ART (mirrors MAJ_CAT defaults + FOCUS cols)."""
+    CALC = ART_TABLES["CALC_ART"]
+    applied = []
+
+    # 1. LISTING: blank/Y/null → 1, N → 0
+    if _col_exists(conn, CALC, COL_LISTING):
+        try:
+            _run(conn, f"""
+                UPDATE [{CALC}] SET [{COL_LISTING}] =
+                    CASE
+                        WHEN [{COL_LISTING}] IS NULL OR LTRIM(RTRIM(CAST([{COL_LISTING}] AS NVARCHAR(10)))) = '' THEN 1
+                        WHEN UPPER(LTRIM(RTRIM(CAST([{COL_LISTING}] AS NVARCHAR(10))))) = 'Y' THEN 1
+                        WHEN UPPER(LTRIM(RTRIM(CAST([{COL_LISTING}] AS NVARCHAR(10))))) = 'N' THEN 0
+                        WHEN ISNUMERIC(CAST([{COL_LISTING}] AS NVARCHAR(10))) = 1 THEN CAST([{COL_LISTING}] AS INT)
+                        ELSE 1
+                    END
+            """)
+            applied.append(f"{COL_LISTING}: blank/Y/null→1, N→0")
+        except Exception as e:
+            steps.append({"step": f"ART Default {COL_LISTING}", "detail": str(e)[:100], "status": "error"})
+
+    # 2. I_ROD: null/0 → 1
+    if _col_exists(conn, CALC, COL_I_ROD):
+        try:
+            _run(conn, f"UPDATE [{CALC}] SET [{COL_I_ROD}] = 1 WHERE [{COL_I_ROD}] IS NULL OR [{COL_I_ROD}] = 0")
+            applied.append(f"{COL_I_ROD}: null/0→1")
+        except Exception as e:
+            logger.debug(f"ART Default {COL_I_ROD}: {e}")
+
+    # 3. Growth rates: null/0 → 1
+    for col in [COL_DISP_GR_DGR, COL_LW_ACT_GR, COL_BGT_SL_GR]:
+        if _col_exists(conn, CALC, col):
+            try:
+                _run(conn, f"UPDATE [{CALC}] SET [{col}] = 1 WHERE [{col}] IS NULL OR [{col}] = 0")
+                applied.append(f"{col}: null/0→1")
+            except Exception as e:
+                logger.debug(f"ART Default {col}: {e}")
+
+    # 4. MANUAL_MBQ: ≤0/null → 0
+    if _col_exists(conn, CALC, COL_MANUAL_MBQ):
+        try:
+            _run(conn, f"UPDATE [{CALC}] SET [{COL_MANUAL_MBQ}] = 0 WHERE [{COL_MANUAL_MBQ}] IS NULL OR [{COL_MANUAL_MBQ}] <= 0")
+            applied.append(f"{COL_MANUAL_MBQ}: ≤0/null→0")
+        except Exception as e:
+            logger.debug(f"ART Default {COL_MANUAL_MBQ}: {e}")
+
+    # 5. FOCUS_W_CAP / FOCUS_WO_CAP: Y → 1, else → 0
+    for col in ("FOCUS_W_CAP", "FOCUS_WO_CAP"):
+        if _col_exists(conn, CALC, col):
+            try:
+                _run(conn, f"""
+                    UPDATE [{CALC}] SET [{col}] =
+                        CASE
+                            WHEN UPPER(LTRIM(RTRIM(CAST([{col}] AS NVARCHAR(10))))) = 'Y' THEN 1
+                            ELSE 0
+                        END
+                """)
+                applied.append(f"{col}: Y→1, else→0")
+            except Exception as e:
+                logger.debug(f"ART Default {col}: {e}")
+
+    steps.append({"step": "ART defaults", "detail": "; ".join(applied), "status": "ok"})
 
 
 def _step_art_sal_d(conn, steps):
-    """Step A3: SAL_D for article level — from ST_MASTER (same as MAJ_CAT level)."""
-    CALC    = ART_TABLES["CALC_ART"]
-    ST_MAST = TABLES["ST_MAST"]
+    """Step A3: SAL_D for article level — from ARS_CALC_ST_MAJ_CAT (already cascaded).
 
-    if not _exists(conn, ST_MAST) or not _col_exists(conn, CALC, "ST_CD"):
-        steps.append({"step": "ART SAL_D", "detail": "ST_MASTER or ST_CD missing", "status": "skip"})
+    ART table has no SL_CVR column. SAL_D is pulled directly from
+    ARS_CALC_ST_MAJ_CAT which already has the correct cascaded value.
+    """
+    CALC  = ART_TABLES["CALC_ART"]
+    MAJ_T = TABLES["CALC"]   # ARS_CALC_ST_MAJ_CAT
+
+    if not _col_exists(conn, CALC, "ST_CD") or not _col_exists(conn, CALC, "MAJ_CAT"):
+        steps.append({"step": "ART SAL_D", "detail": "ST_CD or MAJ_CAT missing in ART calc", "status": "skip"})
+        return
+    if not _exists(conn, MAJ_T) or not _col_exists(conn, MAJ_T, COL_SAL_D):
+        steps.append({"step": "ART SAL_D", "detail": f"{MAJ_T} or SAL_D not found", "status": "skip"})
         return
 
     _ensure_col(conn, CALC, "SAL_D")
     _ensure_col(conn, CALC, "SALE_COVER_SRC", "NVARCHAR(50)")
 
     try:
-        # Base: INT_DAYS + PRD_DAYS + SL_CVR from ST_MASTER
         _run(conn, f"""
-            UPDATE C SET C.[SALE_COVER_SRC]='ST_MASTER',
-                C.[SAL_D] = ISNULL(S.[{COL_INT_DAYS}],0)+ISNULL(S.[{COL_PRD_DAYS}],0)+ISNULL(S.[{COL_SL_CVR}],0)
+            UPDATE C SET C.[SALE_COVER_SRC] = MJ.[{COL_SRC}],
+                C.[SAL_D] = MJ.[{COL_SAL_D}]
             FROM [{CALC}] C
-            INNER JOIN [{ST_MAST}] S WITH (NOLOCK) ON C.[ST_CD]=S.[ST_CD]
+            INNER JOIN [{MAJ_T}] MJ WITH (NOLOCK)
+                ON C.[ST_CD] = MJ.[ST_CD] AND C.[MAJ_CAT] = MJ.[MAJ_CAT]
+            WHERE MJ.[{COL_SAL_D}] IS NOT NULL AND MJ.[{COL_SAL_D}] > 0
         """)
-        # Override with ST_ART's own SL_CVR if available
-        if _col_exists(conn, CALC, COL_SL_CVR):
-            _run(conn, f"""
-                UPDATE C SET C.[SALE_COVER_SRC]='ST_ART',
-                    C.[SAL_D] = ISNULL(S.[{COL_INT_DAYS}],0)+ISNULL(S.[{COL_PRD_DAYS}],0)+ISNULL(C.[{COL_SL_CVR}],0)
-                FROM [{CALC}] C
-                INNER JOIN [{ST_MAST}] S WITH (NOLOCK) ON C.[ST_CD]=S.[ST_CD]
-                WHERE C.[{COL_SL_CVR}] IS NOT NULL AND C.[{COL_SL_CVR}] > 0
-            """)
         cnt = conn.execute(text(f"SELECT COUNT(*) FROM [{CALC}] WHERE [SAL_D]>0")).scalar()
-        steps.append({"step": "ART SAL_D", "detail": f"{cnt} rows", "status": "ok"})
+        steps.append({"step": "ART SAL_D", "detail": f"{cnt} rows from {MAJ_T} (ST_CD+MAJ_CAT)", "status": "ok"})
     except Exception as e:
         steps.append({"step": "ART SAL_D", "detail": str(e)[:150], "status": "error"})
 
@@ -816,17 +1093,21 @@ def calculate_per_day_sale(conn) -> List[Dict[str, Any]]:
     # ── MAJ_CAT level ──
     if not _step_create_calc(conn, steps):
         return steps
-    _step_merge_co_values(conn, steps)
+    _step_fill_co_gaps(conn, steps)
+    _step_overlay_st_values(conn, steps)
     _step_defaults(conn, steps)
     _step_sal_d(conn, steps)
     _step_sal_pd(conn, steps)
 
-    # ── MASTER_GEN_ART_SALE in-place SAL_PD (full option coverage) ──
+    # ── MASTER_GEN_ART_SALE: ensure MAJ_CAT + in-place SAL_PD ──
+    _step_ensure_sale_maj_cat(conn, steps)
     _step_master_sale_sal_pd(conn, steps)
 
-    # ── ART level ──
+    # ── ART level (cascade: CO base → fill gaps → ST overlay) ──
     if _step_create_calc_art(conn, steps):
-        _step_merge_co_art(conn, steps)
+        _step_fill_co_art_gaps(conn, steps)
+        _step_overlay_st_art(conn, steps)
+        _step_art_defaults(conn, steps)
         _step_art_sal_d(conn, steps)
         _step_art_sal_pd(conn, steps)
 
