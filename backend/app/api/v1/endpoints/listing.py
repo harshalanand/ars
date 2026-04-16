@@ -646,9 +646,9 @@ def generate_listing(req: GenerateRequest, current_user: User = Depends(get_curr
         t0 = _time_step("Part 3.55 (MSA_FNL_Q + VAR_COUNT)", t0)
 
         # ── PART 3.6: Populate GEN_ART_DESC + tag OPT_TYPE (4-way classification) ──
-        # Rules (IS_NEW = 0 only — existing store data):
-        #   (a) GEN_ART_DESC contains: SEST, SEDC, -NB, MIX  (keyword match)
-        #   (b) STK_TTL < 60% * DPN                          (low stock)
+        # Rules (applies to ALL rows — both IS_NEW=0 and IS_NEW=1):
+        #   MIX(a): low stock + no MSA   (b): poor color fill (VAR ratio < threshold)
+        #   RL: adequate stock   TBC: low stock + MSA   TBL: zero stock + MSA
         try:
             _run(conn, f"ALTER TABLE [{LISTING_TABLE}] ADD [GEN_ART_DESC] NVARCHAR(500) NULL")
         except Exception:
@@ -671,7 +671,7 @@ def generate_listing(req: GenerateRequest, current_user: User = Depends(get_curr
         #
         #   MIX — (a) low stock + no MSA:  STK < threshold%*DPN AND MSA_FNL_Q = 0
         #         (b) poor color fill:     VAR_FNL_COUNT / VAR_COUNT < threshold%
-        #         Either condition → MIX (option is not viable for replenishment)
+        #         Either condition → MIX (applies to ALL rows, both IS_NEW=0 and IS_NEW=1)
         #   RL  — STK_TTL >= threshold% * DPN  (adequate stock, regardless of MSA)
         #   TBC — 0 < STK < threshold%*DPN AND MSA_FNL_Q > 0  (To Be Check)
         #   TBL — STK_TTL <= 0 AND MSA_FNL_Q > 0              (To Be Listed)
@@ -685,10 +685,8 @@ def generate_listing(req: GenerateRequest, current_user: User = Depends(get_curr
                      AND ISNULL([STK_TTL], 0) < {threshold} * [DPN]
                      AND ISNULL([MSA_FNL_Q], 0) = 0
                         THEN 'MIX'
-                    -- MIX (b): poor color fill (existing rows only — IS_NEW=1 are new
-                    --          MSA recommendations with inherently low VAR ratios)
-                    WHEN [IS_NEW] = 0
-                     AND ISNULL([VAR_COUNT], 0) > 0
+                    -- MIX (b): poor color fill (all rows — IS_NEW=0 and IS_NEW=1)
+                    WHEN ISNULL([VAR_COUNT], 0) > 0
                      AND CAST(ISNULL([VAR_FNL_COUNT], 0) AS FLOAT) / [VAR_COUNT] < {threshold}
                         THEN 'MIX'
                     -- RL: adequate stock
@@ -741,43 +739,23 @@ def generate_listing(req: GenerateRequest, current_user: User = Depends(get_curr
             toc_count = 0
             logger.warning(f"Part 3.6: OPT_TYPE tagging failed: {str(e)[:150]}")
 
-        # VAR ratio override: if VAR_FNL_COUNT/VAR_COUNT < threshold (poor color availability)
-        # → low stock + poor colors = MIX, adequate stock + poor colors = RL
-        try:
-            vt = req.stock_threshold_pct
-            # Poor color + low stock → MIX (even if MSA says TBL/TBC)
-            _run(conn, f"""
-                UPDATE [{LISTING_TABLE}]
-                SET [OPT_TYPE] = 'MIX'
-                WHERE ISNULL([VAR_COUNT], 0) > 0
-                  AND CAST(ISNULL([VAR_FNL_COUNT], 0) AS FLOAT) / [VAR_COUNT] < {vt}
-                  AND ISNULL([MSA_FNL_Q], 0) > 0
-                  AND ISNULL([DPN], 0) > 0
-                  AND ISNULL([STK_TTL], 0) < {vt} * [DPN]
-            """)
-            # Poor color + adequate stock → RL
-            _run(conn, f"""
-                UPDATE [{LISTING_TABLE}]
-                SET [OPT_TYPE] = 'RL'
-                WHERE ISNULL([VAR_COUNT], 0) > 0
-                  AND CAST(ISNULL([VAR_FNL_COUNT], 0) AS FLOAT) / [VAR_COUNT] < {vt}
-                  AND ISNULL([DPN], 0) > 0
-                  AND ISNULL([STK_TTL], 0) >= {vt} * [DPN]
-            """)
-            logger.info(f"Part 3.6: VAR ratio override (threshold={vt})")
-        except Exception as ve:
-            logger.warning(f"Part 3.6: VAR ratio override failed: {str(ve)[:150]}")
-        t0 = _time_step("Part 3.6 (OPT_TYPE + VAR ratio override)", t0)
+        # VAR ratio override removed — MIX(b) now catches ALL rows (IS_NEW=0
+        # and IS_NEW=1) with poor color availability. The RL rule in the CASE
+        # statement naturally handles adequate-stock rows since MIX(b) fires
+        # first and only catches poor-ratio rows.
+        t0 = _time_step("Part 3.6 (OPT_TYPE classification)", t0)
 
         # ── PART 3.7: MIX handling ─────────────────────────────────────────
-        # Three modes (controlled by req.mix_mode):
-        #   "st_maj_rng" (DEFAULT) → 1 line per (WERKS, MAJ_CAT, RNG_SEG)
-        #   "st_maj"               → 1 line per (WERKS, MAJ_CAT) — coarser
-        #   "each"                 → no aggregation, keep each MIX art row
-        # Legacy value "aggregate" → "st_maj"; "mark" → "each"
-        # Only EXISTING store rows (IS_NEW = 0) are aggregated either way.
+        # MIX aggregation always produces exactly 1 MIX row per (WERKS, MAJ_CAT).
+        # mix_mode controls non-MIX behavior only; MIX rows are always grouped
+        # at store × MAJ_CAT level to enforce the max-1-MIX-per-store-MAJ_CAT rule.
+        # ALL MIX-tagged rows are aggregated (both IS_NEW=0 and IS_NEW=1).
+        #
+        # mix_mode values (for future non-MIX uses):
+        #   "st_maj_rng" (DEFAULT), "st_maj", "each"
+        # Legacy: "aggregate" → "st_maj"; "mark" → "each"
         mix_before = conn.execute(text(
-            f"SELECT COUNT(*) FROM [{LISTING_TABLE}] WHERE [OPT_TYPE] = 'MIX' AND [IS_NEW] = 0"
+            f"SELECT COUNT(*) FROM [{LISTING_TABLE}] WHERE [OPT_TYPE] = 'MIX'"
         )).scalar() or 0
 
         _alias = {"aggregate": "st_maj", "mark": "each"}
@@ -823,35 +801,16 @@ def generate_listing(req: GenerateRequest, current_user: User = Depends(get_curr
                 else:
                     dpn_expr = "NULL"; sald_expr = "NULL"; calc_join = ""
 
-                # For st_maj_rng mode: also join vw_master_product for RNG_SEG
-                if mix_mode == "st_maj_rng":
-                    has_mp = _table_exists(conn, "vw_master_product")
-                    if has_mp:
-                        mp_cols = _get_columns(conn, "vw_master_product")
-                        if "RNG_SEG" not in mp_cols:
-                            logger.warning("Part 3.7: RNG_SEG not in vw_master_product — falling back to st_maj")
-                            mix_mode = "st_maj"
-                    else:
-                        logger.warning("Part 3.7: vw_master_product missing — falling back to st_maj")
-                        mix_mode = "st_maj"
-
-                if mix_mode == "st_maj_rng":
-                    mp_join = """
-                        LEFT JOIN [vw_master_product] MP WITH (NOLOCK)
-                            ON L.[GEN_ART_NUMBER] = MP.[ARTICLE_NUMBER]
-                    """
-                    rng_expr       = "ISNULL(LTRIM(RTRIM(MP.[RNG_SEG])), 'NA')"
-                    rng_select_col = f"{rng_expr} AS [RNG_SEG]"
-                    group_by       = f"L.[WERKS], L.[MAJ_CAT], {rng_expr}"
-                    mode_label     = "per (WERKS, MAJ_CAT, RNG_SEG)"
-                else:  # st_maj
-                    mp_join = ""
-                    rng_select_col = "CAST(NULL AS NVARCHAR(100)) AS [RNG_SEG]"
-                    group_by       = "L.[WERKS], L.[MAJ_CAT]"
-                    mode_label     = "per (WERKS, MAJ_CAT)"
+                # MIX always aggregates at (WERKS, MAJ_CAT) level — max 1 MIX
+                # row per store × MAJ_CAT regardless of mix_mode setting.
+                mp_join = ""
+                rng_select_col = "CAST(NULL AS NVARCHAR(100)) AS [RNG_SEG]"
+                group_by       = "L.[WERKS], L.[MAJ_CAT]"
+                mode_label     = "per (WERKS, MAJ_CAT) — max 1 MIX per store×MAJ_CAT"
 
                 staging = "#mix_agg"
                 _run(conn, f"IF OBJECT_ID('tempdb..{staging}') IS NOT NULL DROP TABLE {staging}")
+                # Aggregate ALL MIX-tagged rows (both IS_NEW=0 and IS_NEW=1)
                 _run(conn, f"""
                     SELECT
                         L.[WERKS], MAX(L.[RDC]) AS [RDC], L.[MAJ_CAT],
@@ -868,27 +827,21 @@ def generate_listing(req: GenerateRequest, current_user: User = Depends(get_curr
                     FROM [{LISTING_TABLE}] L
                     {calc_join}
                     {mp_join}
-                    WHERE L.[OPT_TYPE] = 'MIX' AND L.[IS_NEW] = 0
+                    WHERE L.[OPT_TYPE] = 'MIX'
                     GROUP BY {group_by}
                 """)
                 agg_rows = conn.execute(text(f"SELECT COUNT(*) FROM {staging}")).scalar() or 0
 
-                _run(conn, f"DELETE FROM [{LISTING_TABLE}] WHERE [OPT_TYPE] = 'MIX' AND [IS_NEW] = 0")
+                # Delete ALL MIX rows (both IS_NEW=0 and IS_NEW=1) — replaced by aggregated
+                _run(conn, f"DELETE FROM [{LISTING_TABLE}] WHERE [OPT_TYPE] = 'MIX'")
 
-                # Build INSERT — only include RNG_SEG if listing has that column
-                listing_cols_upper = {c.upper() for c in _get_columns(conn, LISTING_TABLE)}
+                # Build INSERT columns
                 ins_cols = ["WERKS", "RDC", "MAJ_CAT", "GEN_ART_NUMBER", "CLR",
                             "GEN_ART_DESC", "IS_NEW", "OPT_TYPE", "DPN", "SAL_D"]
+                # Include RNG_SEG (always NULL for MIX) if column exists on listing
+                listing_cols_upper = {c.upper() for c in _get_columns(conn, LISTING_TABLE)}
                 if "RNG_SEG" in listing_cols_upper:
                     ins_cols.append("RNG_SEG")
-                else:
-                    # RNG_SEG was staged but doesn't exist on listing yet — add it
-                    if mix_mode == "st_maj_rng":
-                        try:
-                            _run(conn, f"ALTER TABLE [{LISTING_TABLE}] ADD [RNG_SEG] NVARCHAR(100) NULL")
-                            ins_cols.append("RNG_SEG")
-                        except Exception:
-                            pass
                 ins_cols += sum_cols
                 ins_cols_sql = ", ".join(f"[{c}]" for c in ins_cols)
                 _run(conn, f"""
@@ -897,9 +850,17 @@ def generate_listing(req: GenerateRequest, current_user: User = Depends(get_curr
                 """)
                 _run(conn, f"DROP TABLE {staging}")
 
+                # Verify: max 1 MIX row per (WERKS, MAJ_CAT)
+                mix_dupes = conn.execute(text(
+                    f"SELECT COUNT(*) FROM (SELECT [WERKS], [MAJ_CAT], COUNT(*) AS cnt "
+                    f"FROM [{LISTING_TABLE}] WHERE [OPT_TYPE] = 'MIX' "
+                    f"GROUP BY [WERKS], [MAJ_CAT] HAVING COUNT(*) > 1) X"
+                )).scalar() or 0
+
                 logger.info(f"Part 3.7: aggregated {mix_before} MIX rows → {agg_rows} MIX lines "
                             f"[{mode_label}], summed {len(sum_cols)} numeric cols "
-                            f"(DPN/SAL_D fetched from ARS_CALC_ST_MAJ_CAT, not summed)")
+                            f"(DPN/SAL_D fetched from ARS_CALC_ST_MAJ_CAT, not summed)"
+                            f"{f' | WARNING: {mix_dupes} store×MAJ_CAT with >1 MIX' if mix_dupes else ''}")
             except Exception as e:
                 logger.warning(f"Part 3.7 MIX aggregation failed: {str(e)[:200]}")
         else:
@@ -1126,14 +1087,20 @@ def generate_listing(req: GenerateRequest, current_user: User = Depends(get_curr
             default_rate = _sql_max(l7_daily, auto_daily) if has_auto else l7_daily
             new_rate = _sql_max(per_opt, l7_daily, auto_daily)
 
-            # Use "new article" rate (includes PER_OPT_SALE) ONLY when AGE < 15
+            # Use "new article" rate (includes PER_OPT_SALE) when:
+            #   AGE < threshold  OR  AGE is NULL/blank/0 (unknown = treat as new)
+            # IS_NEW=1 rows always get AGE=0 (new MSA options are always "new",
+            # even if master data carries a stale AGE value).
+            # Only use default_rate (excludes PER_OPT_SALE) when AGE >= threshold.
             if has_age:
+                # Effective AGE: IS_NEW=1 → 0, else → ISNULL(AGE, 0)
+                eff_age = "CASE WHEN ISNULL([IS_NEW], 0) = 1 THEN 0 ELSE ISNULL([AGE], 0) END"
                 rate_expr = (
-                    f"CASE WHEN [AGE] IS NOT NULL AND [AGE] < {int(req.age_threshold)} "
+                    f"CASE WHEN ({eff_age}) < {int(req.age_threshold)} "
                     f"THEN {new_rate} ELSE {default_rate} END"
                 )
             else:
-                rate_expr = default_rate
+                rate_expr = new_rate
 
             # OPT_MBQ = DPN + rate × SAL_D
             _run(conn, f"""
