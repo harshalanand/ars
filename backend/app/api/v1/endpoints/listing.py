@@ -45,6 +45,8 @@ _FINAL_KEEP_COLS = {
     "WERKS", "RDC", "MAJ_CAT", "GEN_ART_NUMBER", "CLR", "GEN_ART_DESC",
     "STK_TTL", "IS_NEW", "OPT_TYPE",
     "DPN", "SAL_D", "AUTO_GEN_ART_SALE", "AGE",
+    "LISTING", "I_ROD", "CLR_MIN", "CLR_MAX",
+    "FOCUS_W_CAP", "FOCUS_WO_CAP",
     "MSA_FNL_Q", "VAR_COUNT", "VAR_FNL_COUNT",
     "PER_OPT_SALE", "OPT_MBQ", "OPT_REQ", "OPT_MBQ_WH", "OPT_REQ_WH", "EXCESS_STK",
     "ST_RANK", "MAX_DAILY_SALE",
@@ -328,10 +330,17 @@ def generate_listing(req: GenerateRequest, current_user: User = Depends(get_curr
         if not all(c in grid_cols for c in ["WERKS", "MAJ_CAT", "GEN_ART_NUMBER", "CLR"]):
             raise HTTPException(400, "Grid table missing WERKS, MAJ_CAT, GEN_ART_NUMBER, CLR")
 
-        # Stock columns = pivot data only (exclude system/calc cols)
+        # SLOC columns = pivot data only (exclude system/calc cols + sale cols)
+        # Sale columns (L-7 DAYS SALE-Q etc.) are NOT stock — must not be summed into STK_TTL.
         skip_cols = {"WERKS", "MAJ_CAT", "GEN_ART_NUMBER", "CLR", "STK_TTL", "IS_NEW",
-                     "CONT", "MBQ", "OPT_CNT", "LISTING"}
+                     "CONT", "MBQ", "OPT_CNT", "LISTING",
+                     "DPN", "SAL_D", "SAL_PD", "DISP_Q", "DISP_GR_DGR",
+                     "LW_ACT_SL_GR_DGR", "BGT_SL_GR_DGR", "MANUAL_DENSITY"}
         stock_cols = [c for c in grid_cols if c not in skip_cols]
+        # Separate sale columns (contain "SALE" or "L-7" in name) — carried but NOT summed
+        sale_cols = [c for c in stock_cols if "SALE" in c.upper() or "L-7" in c.upper() or "L_7" in c.upper()]
+        # STK_TTL columns = stock_cols minus sale columns
+        stk_sum_cols = [c for c in stock_cols if c not in sale_cols]
 
         # ST_MASTER RDC column
         st_rdc_col = None
@@ -406,15 +415,20 @@ def generate_listing(req: GenerateRequest, current_user: User = Depends(get_curr
         """)
 
         # ── SQL fragments ───────────────────────────────────────────────
+        # All SLOC + sale columns are carried (SELECT + INSERT)
         stk_sel = ", ".join(f"ISNULL(G.[{c}], 0) AS [{c}]" for c in stock_cols)
         stk_sel_str = f", {stk_sel}" if stk_sel else ""
-        stk_ttl = " + ".join(f"ISNULL(G.[{c}], 0)" for c in stock_cols) if stock_cols else "0"
+        # STK_TTL = sum of STOCK columns only (excludes sale columns like L-7 DAYS SALE-Q)
+        stk_ttl = " + ".join(f"ISNULL(G.[{c}], 0)" for c in stk_sum_cols) if stk_sum_cols else "0"
         stk_ins = ", ".join(f"[{c}]" for c in stock_cols)
         stk_ins_str = f", {stk_ins}" if stk_ins else ""
         stk_zeros = ", ".join("0" for _ in stock_cols)
         stk_zeros_str = f", {stk_zeros}" if stk_zeros else ""
 
         all_cols = f"[WERKS], [RDC], [MAJ_CAT], [GEN_ART_NUMBER], [CLR]{stk_ins_str}, [STK_TTL], [IS_NEW], [OPT_TYPE]"
+
+        if sale_cols:
+            logger.info(f"Sale columns excluded from STK_TTL sum: {sale_cols}")
 
         # ── Diagnostic: source counts ───────────────────────────────────
         diag_stores = conn.execute(text(f"SELECT COUNT(*) FROM ({stores_sql}) X")).scalar()
@@ -529,6 +543,63 @@ def generate_listing(req: GenerateRequest, current_user: User = Depends(get_curr
                         ON L.[WERKS] = C.[ST_CD] AND L.[MAJ_CAT] = C.[MAJ_CAT]
                 """)
                 logger.info("Part 3.5: DPN, SAL_D from ARS_CALC_ST_MAJ_CAT")
+
+        # Part 3.5a: Enrich LISTING, I_ROD, CLR_MIN, CLR_MAX, FOCUS_W_CAP, FOCUS_WO_CAP
+        # Step 1: from ARS_CALC_ST_MAJ_CAT (store × MAJ_CAT grain)
+        # Step 2: cascade from ARS_CALC_ST_ART (store × OPT grain — overrides where available)
+        # Note: MANUAL_DENSITY is NOT enriched here — it is used for DPN override in Part 4c.
+        enrich_cols_maj = ["LISTING", "I_ROD", "CLR_MIN", "CLR_MAX"]
+        enrich_cols_art = ["LISTING", "I_ROD", "FOCUS_W_CAP", "FOCUS_WO_CAP"]
+        all_enrich = sorted(set(enrich_cols_maj + enrich_cols_art))
+        for col in all_enrich:
+            try:
+                _run(conn, f"ALTER TABLE [{LISTING_TABLE}] ADD [{col}] FLOAT NULL")
+            except Exception:
+                pass
+
+        # Step 1: ST_MAJ_CAT base (LISTING, I_ROD, CLR_MIN, CLR_MAX)
+        if _table_exists(conn, "ARS_CALC_ST_MAJ_CAT"):
+            maj_cols = _get_columns(conn, "ARS_CALC_ST_MAJ_CAT")
+            maj_upd = []
+            for col in enrich_cols_maj:
+                if col in maj_cols:
+                    maj_upd.append(f"L.[{col}] = TRY_CAST(C.[{col}] AS FLOAT)")
+            if maj_upd:
+                _run(conn, f"""
+                    UPDATE L SET {', '.join(maj_upd)}
+                    FROM [{LISTING_TABLE}] L
+                    INNER JOIN [ARS_CALC_ST_MAJ_CAT] C WITH (NOLOCK)
+                        ON L.[WERKS] = C.[ST_CD] AND L.[MAJ_CAT] = C.[MAJ_CAT]
+                """)
+                logger.info(f"Part 3.5a: {[c.split('.')[-1] for c in maj_upd]} from ARS_CALC_ST_MAJ_CAT")
+
+        # Step 2: ST_ART cascade (LISTING, I_ROD, FOCUS_W_CAP, FOCUS_WO_CAP)
+        # Article-level values override MAJ_CAT-level where ARS_CALC_ST_ART has data.
+        if _table_exists(conn, "ARS_CALC_ST_ART"):
+            art_cols = _get_columns(conn, "ARS_CALC_ST_ART")
+            art_upd = []
+            art_where = []
+            for col in enrich_cols_art:
+                if col in art_cols:
+                    art_upd.append(f"L.[{col}] = TRY_CAST(A.[{col}] AS FLOAT)")
+                    art_where.append(f"(A.[{col}] IS NOT NULL AND LTRIM(RTRIM(CAST(A.[{col}] AS NVARCHAR(50)))) NOT IN ('', '0'))")
+            if art_upd:
+                # Build join — ARS_CALC_ST_ART has ST_CD, MAJ_CAT, GEN_ART_NUMBER [, CLR]
+                art_join = "L.[WERKS] = A.[ST_CD] AND L.[MAJ_CAT] = A.[MAJ_CAT]"
+                if "GEN_ART_NUMBER" in art_cols:
+                    art_join += " AND L.[GEN_ART_NUMBER] = A.[GEN_ART_NUMBER]"
+                if "CLR" in art_cols:
+                    art_join += " AND L.[CLR] = A.[CLR]"
+                # Only override where ART has non-null/non-zero values
+                where_clause = f" WHERE ({' OR '.join(art_where)})" if art_where else ""
+                _run(conn, f"""
+                    UPDATE L SET {', '.join(art_upd)}
+                    FROM [{LISTING_TABLE}] L
+                    INNER JOIN [ARS_CALC_ST_ART] A WITH (NOLOCK) ON {art_join}
+                    {where_clause}
+                """)
+                logger.info(f"Part 3.5a: {[c for c in enrich_cols_art if c in art_cols]} cascaded from ARS_CALC_ST_ART")
+        t0 = _time_step("Part 3.5a (LISTING/I_ROD/CLR/FOCUS)", t0)
 
         # Part 3.5b: Populate AUTO_GEN_ART_SALE from MASTER_GEN_ART_SALE.SAL_PD
         # Option grain: (ST_CD, MAJ_CAT, GEN_ART_NUMBER, CLR). The master table
@@ -1071,6 +1142,49 @@ def generate_listing(req: GenerateRequest, current_user: User = Depends(get_curr
             except Exception:
                 pass
 
+        # ── Part 4c pre: DPN override from MANUAL_DENSITY (article-level) ──
+        # If MANUAL_DENSITY > 0 at OPT grain, override DPN for that OPT.
+        # Try ARS_CALC_ST_ART first (rebuilt in full mode), then fall back
+        # to Master_ALC_INPUT_ST_ART directly (works even in listing-only mode).
+        # Also handles legacy column name MANUAL_MBQ (before migration).
+        _dpn_override_done = False
+        for _src_tbl in ["ARS_CALC_ST_ART", "Master_ALC_INPUT_ST_ART"]:
+            if _dpn_override_done or not _table_exists(conn, _src_tbl):
+                continue
+            _src_cols = _get_columns(conn, _src_tbl)
+            # Find the column: MANUAL_DENSITY (new) or MANUAL_MBQ (legacy)
+            _md_col = "MANUAL_DENSITY" if "MANUAL_DENSITY" in _src_cols else (
+                      "MANUAL_MBQ" if "MANUAL_MBQ" in _src_cols else None)
+            if not _md_col:
+                continue
+            # Build join: WERKS=ST_CD + MAJ_CAT [+ GEN_ART_NUMBER] [+ CLR]
+            _art_join = "L.[WERKS] = A.[ST_CD] AND L.[MAJ_CAT] = A.[MAJ_CAT]"
+            # Article key: GEN_ART_NUMBER or 10_DIGIT or ART_NUMBER
+            _art_key = next((c for c in ["GEN_ART_NUMBER", "10_DIGIT", "ART_NUMBER", "ARTICLE_NUMBER"] if c in _src_cols), None)
+            if _art_key:
+                if _art_key == "GEN_ART_NUMBER":
+                    _art_join += f" AND L.[GEN_ART_NUMBER] = A.[{_art_key}]"
+                else:
+                    _art_join += f" AND L.[GEN_ART_NUMBER] = TRY_CAST(TRY_CAST(A.[{_art_key}] AS FLOAT) AS BIGINT)"
+            if "CLR" in _src_cols:
+                _art_join += " AND L.[CLR] = A.[CLR]"
+            try:
+                _run(conn, f"""
+                    UPDATE L SET L.[DPN] = TRY_CAST(A.[{_md_col}] AS FLOAT)
+                    FROM [{LISTING_TABLE}] L
+                    INNER JOIN [{_src_tbl}] A WITH (NOLOCK) ON {_art_join}
+                    WHERE ISNULL(TRY_CAST(A.[{_md_col}] AS FLOAT), 0) > 0
+                """)
+                _cnt = conn.execute(text(
+                    f"SELECT COUNT(*) FROM [{LISTING_TABLE}] L "
+                    f"INNER JOIN [{_src_tbl}] A WITH (NOLOCK) ON {_art_join} "
+                    f"WHERE ISNULL(TRY_CAST(A.[{_md_col}] AS FLOAT), 0) > 0"
+                )).scalar() or 0
+                logger.info(f"Part 4c: DPN overridden by {_src_tbl}.{_md_col} for {_cnt} rows")
+                _dpn_override_done = True
+            except Exception as e:
+                logger.warning(f"Part 4c: {_src_tbl}.{_md_col} → DPN override failed: {str(e)[:150]}")
+
         listing_cols = _get_columns(conn, LISTING_TABLE)
         has_auto    = "AUTO_GEN_ART_SALE" in listing_cols
         has_age     = "AGE" in listing_cols
@@ -1335,6 +1449,9 @@ def generate_listing(req: GenerateRequest, current_user: User = Depends(get_curr
                         "(ISNULL([VAR_COUNT], 0) = 0 OR "
                         "CAST(ISNULL([VAR_FNL_COUNT], 0) AS FLOAT) / NULLIF([VAR_COUNT], 0) >= 0.6)"
                     )
+                # Only listed OPTs (LISTING = 1)
+                if "LISTING" in all_upper:
+                    where.append("ISNULL(TRY_CAST([LISTING] AS INT), 1) = 1")
                 where_sql = (" WHERE " + " AND ".join(where)) if where else ""
 
                 _run(wc, f"""
@@ -1622,6 +1739,31 @@ def generate_listing(req: GenerateRequest, current_user: User = Depends(get_curr
                                 AND LTRIM(RTRIM(CAST(M.[SZ] AS NVARCHAR(200)))) = LTRIM(RTRIM(CAST(A.[SZ] AS NVARCHAR(200))))
                             WHERE A.[CONT] IS NULL
                         """)
+                        # Auto-generate fallback: if CONT is still NULL or 0,
+                        # set CONT = 1 / COUNT(sizes) per (WERKS, MAJ_CAT).
+                        # Equal distribution across all sizes for that store × category.
+                        _run(ac, f"""
+                            ;WITH SzCount AS (
+                                SELECT [WERKS], [MAJ_CAT], COUNT(DISTINCT [SZ]) AS sz_cnt
+                                FROM [{ALLOC_TABLE}]
+                                GROUP BY [WERKS], [MAJ_CAT]
+                            )
+                            UPDATE A SET A.[CONT] = ROUND(1.0 / NULLIF(C.sz_cnt, 0), 4)
+                            FROM [{ALLOC_TABLE}] A
+                            INNER JOIN SzCount C ON A.[WERKS] = C.[WERKS] AND A.[MAJ_CAT] = C.[MAJ_CAT]
+                            WHERE ISNULL(A.[CONT], 0) = 0
+                        """)
+                        auto_cnt = ac.execute(text(
+                            f"SELECT COUNT(*) FROM [{ALLOC_TABLE}] "
+                            f"WHERE [CONT] IS NOT NULL AND [CONT] > 0"
+                        )).scalar() or 0
+                        null_cnt = ac.execute(text(
+                            f"SELECT COUNT(*) FROM [{ALLOC_TABLE}] WHERE ISNULL([CONT], 0) = 0"
+                        )).scalar() or 0
+                        if null_cnt == 0:
+                            logger.info(f"{ALLOC_TABLE}: CONT — all {auto_cnt} rows have values (store/CO/auto-generated)")
+                        else:
+                            logger.warning(f"{ALLOC_TABLE}: CONT — {auto_cnt} rows OK, {null_cnt} still 0")
                         # SZ_MBQ = OPT_MBQ × CONT;  SZ_REQ = ROUND(MAX(SZ_MBQ - STK_TTL, 0), 0)
                         _run(ac, f"""
                             UPDATE [{ALLOC_TABLE}]
@@ -1639,7 +1781,36 @@ def generate_listing(req: GenerateRequest, current_user: User = Depends(get_curr
                     except Exception as ce:
                         logger.warning(f"{ALLOC_TABLE}: CONT/SZ_MBQ/SZ_REQ failed: {ce}")
                 else:
-                    logger.info(f"{ALLOC_TABLE}: Master_CONT_SZ not found, skipping SZ_MBQ/SZ_REQ")
+                    # No Master_CONT_SZ table — auto-generate CONT = 1/COUNT(SZ) for all rows
+                    logger.info(f"{ALLOC_TABLE}: Master_CONT_SZ not found — auto-generating CONT = 1/COUNT(SZ)")
+                    for col, typ in (("CONT", "FLOAT"), ("SZ_MBQ", "FLOAT"), ("SZ_REQ", "FLOAT")):
+                        try:
+                            _run(ac, f"ALTER TABLE [{ALLOC_TABLE}] ADD [{col}] {typ} NULL")
+                        except Exception:
+                            pass
+                    try:
+                        _run(ac, f"""
+                            ;WITH SzCount AS (
+                                SELECT [WERKS], [MAJ_CAT], COUNT(DISTINCT [SZ]) AS sz_cnt
+                                FROM [{ALLOC_TABLE}]
+                                GROUP BY [WERKS], [MAJ_CAT]
+                            )
+                            UPDATE A SET A.[CONT] = ROUND(1.0 / NULLIF(C.sz_cnt, 0), 4)
+                            FROM [{ALLOC_TABLE}] A
+                            INNER JOIN SzCount C ON A.[WERKS] = C.[WERKS] AND A.[MAJ_CAT] = C.[MAJ_CAT]
+                        """)
+                        _run(ac, f"""
+                            UPDATE [{ALLOC_TABLE}]
+                            SET [SZ_MBQ] = ISNULL([OPT_MBQ], 0) * ISNULL([CONT], 0),
+                                [SZ_REQ] = CASE
+                                    WHEN (ISNULL([OPT_MBQ], 0) * ISNULL([CONT], 0)) - ISNULL([STK_TTL], 0) > 0
+                                        THEN ROUND((ISNULL([OPT_MBQ], 0) * ISNULL([CONT], 0)) - ISNULL([STK_TTL], 0), 0)
+                                    ELSE 0
+                                END
+                        """)
+                        logger.info(f"{ALLOC_TABLE}: auto-generated CONT + SZ_MBQ + SZ_REQ (no Master_CONT_SZ)")
+                    except Exception as ce:
+                        logger.warning(f"{ALLOC_TABLE}: auto-generate CONT failed: {ce}")
 
                 # ── ALLOC_QTY: WATERFALL allocation (sequential pool consumption) ──
                 # FNL_Q is a SHARED pool per (RDC, MAJ_CAT, GEN_ART_NUMBER, CLR,

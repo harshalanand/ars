@@ -12,7 +12,7 @@ PRIORITY RULE for CO_MAJ_CAT vs ST_MAJ_CAT:
 STEPS:
   1. Create calc table (copy from ST_MAJ_CAT)
   2. Merge CO_MAJ_CAT values (apply to all stores)
-  3. Apply defaults: LISTING, I_ROD, MANUAL_MBQ, growth rates, CLR/DPN
+  3. Apply defaults: LISTING, I_ROD, growth rates, CLR/DPN
   4. Calculate SAL_D (total sale days)
   5. Calculate SAL_PD (per day sale)
 
@@ -54,7 +54,7 @@ COL_NM_REM_D    = "NM_REM_D"
 # Columns that need CO/ST merge + defaults
 COL_LISTING     = "LISTING"
 COL_I_ROD       = "I_ROD"
-COL_MANUAL_MBQ  = "MANUAL_MBQ"
+COL_MANUAL_DENSITY = "MANUAL_DENSITY"
 COL_DISP_GR_DGR = "DISP_GR_DGR"
 COL_LW_ACT_GR   = "LW_ACT_SL_GR_DGR"
 COL_BGT_SL_GR   = "BGT_SL_GR_DGR"
@@ -366,14 +366,6 @@ def _step_defaults(conn, steps):
                 applied.append(f"{col}: null/0→1")
             except Exception as e:
                 logger.debug(f"Default {col}: {e}")
-
-    # 4. MANUAL_MBQ: ≤0/null → 0
-    if _col_exists(conn, CALC, COL_MANUAL_MBQ):
-        try:
-            _run(conn, f"UPDATE [{CALC}] SET [{COL_MANUAL_MBQ}] = 0 WHERE [{COL_MANUAL_MBQ}] IS NULL OR [{COL_MANUAL_MBQ}] <= 0")
-            applied.append(f"{COL_MANUAL_MBQ}: ≤0/null→0")
-        except Exception as e:
-            logger.debug(f"Default {COL_MANUAL_MBQ}: {e}")
 
     steps.append({"step": "Apply defaults", "detail": "; ".join(applied), "status": "ok"})
 
@@ -820,15 +812,29 @@ def _step_art_defaults(conn, steps):
             except Exception as e:
                 logger.debug(f"ART Default {col}: {e}")
 
-    # 4. MANUAL_MBQ: ≤0/null → 0
-    if _col_exists(conn, CALC, COL_MANUAL_MBQ):
+    # 4. MANUAL_DENSITY: ≤0/null → 0
+    if _col_exists(conn, CALC, COL_MANUAL_DENSITY):
         try:
-            _run(conn, f"UPDATE [{CALC}] SET [{COL_MANUAL_MBQ}] = 0 WHERE [{COL_MANUAL_MBQ}] IS NULL OR [{COL_MANUAL_MBQ}] <= 0")
-            applied.append(f"{COL_MANUAL_MBQ}: ≤0/null→0")
+            _run(conn, f"UPDATE [{CALC}] SET [{COL_MANUAL_DENSITY}] = 0 WHERE [{COL_MANUAL_DENSITY}] IS NULL OR [{COL_MANUAL_DENSITY}] <= 0")
+            applied.append(f"{COL_MANUAL_DENSITY}: ≤0/null→0")
         except Exception as e:
-            logger.debug(f"ART Default {COL_MANUAL_MBQ}: {e}")
+            logger.debug(f"ART Default {COL_MANUAL_DENSITY}: {e}")
 
-    # 5. FOCUS_W_CAP / FOCUS_WO_CAP: Y → 1, else → 0
+    # 5. DPN override: if MANUAL_DENSITY > 0, use it as DPN (article level)
+    if _col_exists(conn, CALC, COL_MANUAL_DENSITY) and _col_exists(conn, CALC, COL_DPN):
+        try:
+            _run(conn, f"""
+                UPDATE [{CALC}] SET [{COL_DPN}] = [{COL_MANUAL_DENSITY}]
+                WHERE ISNULL(TRY_CAST([{COL_MANUAL_DENSITY}] AS FLOAT), 0) > 0
+            """)
+            cnt = conn.execute(text(
+                f"SELECT COUNT(*) FROM [{CALC}] WHERE ISNULL(TRY_CAST([{COL_MANUAL_DENSITY}] AS FLOAT), 0) > 0"
+            )).scalar()
+            applied.append(f"DPN overridden by {COL_MANUAL_DENSITY} for {cnt} rows")
+        except Exception as e:
+            logger.debug(f"ART DPN override by {COL_MANUAL_DENSITY}: {e}")
+
+    # 6. FOCUS_W_CAP / FOCUS_WO_CAP: Y → 1, else → 0
     for col in ("FOCUS_W_CAP", "FOCUS_WO_CAP"):
         if _col_exists(conn, CALC, col):
             try:
@@ -1085,6 +1091,25 @@ def calculate_per_day_sale(conn) -> List[Dict[str, Any]]:
         A4. SAL_PD (JOIN MASTER_GEN_ART_SALE for CM_SAL_Q/NM_SAL_Q + ST_MAJ_CAT for CM_REM_D/NM_REM_D)
     """
     steps = []
+
+    # ── Migration: rename MANUAL_MBQ → MANUAL_DENSITY in ART input tables only ──
+    # MANUAL_DENSITY concept only applies at article level (not MAJ_CAT).
+    # MAJ_CAT tables: drop column if exists (no longer used).
+    # ART tables: rename MANUAL_MBQ → MANUAL_DENSITY.
+    for tbl in ["Master_ALC_INPUT_CO_MAJ_CAT", "Master_ALC_INPUT_ST_MAJ_CAT"]:
+        if _exists(conn, tbl) and _col_exists(conn, tbl, "MANUAL_MBQ"):
+            try:
+                _run(conn, f"ALTER TABLE [{tbl}] DROP COLUMN [MANUAL_MBQ]")
+                steps.append({"step": "Drop column", "detail": f"{tbl}: MANUAL_MBQ dropped (not used at MAJ_CAT level)", "status": "ok"})
+            except Exception:
+                pass
+    for tbl in ["MASTER_ALC_INPUT_CO_ART", "Master_ALC_INPUT_ST_ART"]:
+        if _exists(conn, tbl) and _col_exists(conn, tbl, "MANUAL_MBQ"):
+            try:
+                _run(conn, f"EXEC sp_rename '[{tbl}].[MANUAL_MBQ]', 'MANUAL_DENSITY', 'COLUMN'")
+                steps.append({"step": "Migrate column", "detail": f"{tbl}: MANUAL_MBQ → MANUAL_DENSITY", "status": "ok"})
+            except Exception:
+                pass
 
     # Ensure PKs
     for msg in ensure_primary_keys(conn):

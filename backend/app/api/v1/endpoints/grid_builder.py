@@ -400,7 +400,7 @@ POST_PIVOT_LOOKUPS = [
     #    CONT: ST_MAJ_CAT first, CO_MAJ_CAT fallback (merged during pre-grid calc)
     {
         "lookup_table": "ARS_CALC_ST_MAJ_CAT",
-        "columns":      ["DISP_Q", "DPN", "SAL_D", "SAL_PD", "DISP_GR_DGR", "LW_ACT_SL_GR_DGR", "BGT_SL_GR_DGR", "MANUAL_MBQ", "CONT"],
+        "columns":      ["DISP_Q", "DPN", "SAL_D", "SAL_PD", "DISP_GR_DGR", "LW_ACT_SL_GR_DGR", "BGT_SL_GR_DGR", "CONT"],
         "join_on":      {"WERKS": "ST_CD", "MAJ_CAT": "MAJ_CAT"},
         "requires":     ["WERKS", "MAJ_CAT"],
     },
