@@ -77,6 +77,8 @@ class GenerateRequest(BaseModel):
     age_threshold: int = 15            # Articles with AGE < X use PER_OPT_SALE in OPT_MBQ
     req_weight: float = 0.4            # Store ranking: weight for requirement rank
     fill_weight: float = 0.6           # Store ranking: weight for fill rate rank
+    # Allocation:
+    enable_fallback: bool = False      # Enable fallback allocation (demote grids one by one)
     # Source tables:
     msa_table: str = "ARS_MSA_GEN_ART"
     grid_table: str = "ARS_GRID_MJ_GEN_ART"
@@ -196,6 +198,7 @@ _SETTING_DEFAULTS = {
     "run_mode": "listing",
     "req_weight": "0.4",
     "fill_weight": "0.6",
+    "enable_fallback": "false",
 }
 _SETTING_PREFIX = "listing."
 
@@ -268,6 +271,7 @@ def generate_listing(req: GenerateRequest, current_user: User = Depends(get_curr
                 "run_mode": req.run_mode,
                 "req_weight": str(req.req_weight),
                 "fill_weight": str(req.fill_weight),
+                "enable_fallback": str(req.enable_fallback).lower(),
             })
     except Exception:
         pass  # non-critical
@@ -1093,6 +1097,8 @@ def generate_listing(req: GenerateRequest, current_user: User = Depends(get_curr
                 logger.warning(f"Part 4: {gname} failed in {dt}s: {str(e)[:200]}")
                 step_timings.append({"step": f"Part 4 [{gname}] FAILED", "seconds": dt})
 
+        t0 = _time_step("Part 4a (Grid column joins)", t0)
+
         # ── Part 4b: PER_OPT_SALE from the grid flagged use_for_opt_sale ──
         listing_cols = _get_columns(conn, LISTING_TABLE)
         has_dpn  = "DPN"  in listing_cols
@@ -1122,6 +1128,8 @@ def generate_listing(req: GenerateRequest, current_user: User = Depends(get_curr
                     END
                 """)
                 logger.info(f"Part 4b: PER_OPT_SALE from {opt_grid_row[0]}")
+
+        t0 = _time_step("Part 4b (PER_OPT_SALE)", t0)
 
         # ── Part 4c: OPT_MBQ + OPT_REQ (moved here from Part 5 — needed for excess calc) ──
         listing_cols = _get_columns(conn, LISTING_TABLE)
@@ -1266,6 +1274,8 @@ def generate_listing(req: GenerateRequest, current_user: User = Depends(get_curr
 
             logger.info(f"Part 4c: OPT_MBQ + OPT_REQ + OPT_MBQ_WH(hold={hold}d) + OPT_REQ_WH + MAX_DAILY_SALE")
 
+        t0 = _time_step("Part 4c (OPT_MBQ + OPT_REQ + OPT_MBQ_WH + MAX_DAILY_SALE)", t0)
+
         # ── Part 4d: ART_EXCESS = MAX(0, STK_TTL - 2*OPT_MBQ), skip MIX ──
         # This is the article-level excess used to deduct from each grid's stock.
         try:
@@ -1287,6 +1297,8 @@ def generate_listing(req: GenerateRequest, current_user: User = Depends(get_curr
         """)
         art_excess_sum = conn.execute(text(f"SELECT SUM([ART_EXCESS]) FROM [{LISTING_TABLE}]")).scalar() or 0
         logger.info(f"Part 4d: ART_EXCESS calculated (total excess={art_excess_sum:.0f}, MIX rows skipped)")
+
+        t0 = _time_step("Part 4d (ART_EXCESS + EXCESS_STK)", t0)
 
         # ── Part 4e: Per-grid REQ with aggregated excess deduction ──────
         # For each grid: aggregate ART_EXCESS by that grid's hierarchy,
@@ -1359,7 +1371,7 @@ def generate_listing(req: GenerateRequest, current_user: User = Depends(get_curr
             pass
 
         logger.info(f"Part 4 complete: {len(mapped_grids)} grids: {', '.join(mapped_grids)}")
-        t0 = _time_step("Part 4 (grid joins + OPT_MBQ + excess + REQ)", t0)
+        t0 = _time_step("Part 4e (Per-grid REQ with excess deduction)", t0)
 
         # ── PART 5: All moved earlier ──────────────────────────────────
         # OPT_MBQ/OPT_REQ/EXCESS_STK → Part 4c/4d
@@ -1370,6 +1382,7 @@ def generate_listing(req: GenerateRequest, current_user: User = Depends(get_curr
             _run(conn, f"CREATE NONCLUSTERED INDEX IX_{LISTING_TABLE}_RDC ON [{LISTING_TABLE}]([RDC])")
         except Exception:
             pass
+        t0 = _time_step("Part 5 (Final indexes)", t0)
 
     # ── Auto-create ARS_STORE_RANKING (before working table) ──────────
     RANK_TABLE = "ARS_STORE_RANKING"
@@ -1425,6 +1438,7 @@ def generate_listing(req: GenerateRequest, current_user: User = Depends(get_curr
             logger.info(f"ST_RANK populated into {LISTING_TABLE}")
     except Exception as e:
         logger.warning(f"{RANK_TABLE} creation failed: {e}")
+    t0 = _time_step("Part 6 (Store Ranking)", t0)
 
     # ── Auto-create ARS_LISTING_WORKING (filtered copy) ───────────────
     working_rows = 0
@@ -1631,281 +1645,24 @@ def generate_listing(req: GenerateRequest, current_user: User = Depends(get_curr
 
     except Exception as e:
         logger.warning(f"Auto-create {FINAL_TABLE} failed: {e}")
+    t0 = _time_step(f"Part 7 (Working table + Hierarchy + ALLOC_FLAG → {working_rows} rows)", t0)
 
-    # ── Auto-create ARS_ALLOC_WORKING (eligible options × variant articles) ──
+    # ── Multi-level allocation (RL → TBC → TBL, I_ROD rounds, per-OPT validation) ──
     alloc_rows = 0
     try:
+        from app.services.listing_allocator import run_multilevel_allocation
         with de.connect() as ac:
-            if _table_exists(ac, FINAL_TABLE) and _table_exists(ac, "ARS_MSA_VAR_ART"):
-                _run(ac, f"IF OBJECT_ID('{ALLOC_TABLE}','U') IS NOT NULL DROP TABLE [{ALLOC_TABLE}]")
-                _run(ac, f"""
-                    SELECT
-                        W.[WERKS], W.[RDC], W.[MAJ_CAT], W.[GEN_ART_NUMBER], W.[CLR],
-                        W.[GEN_ART_DESC], W.[OPT_TYPE], W.[ST_RANK],
-                        W.[DPN], W.[SAL_D],
-                        W.[OPT_MBQ], W.[OPT_REQ], W.[OPT_MBQ_WH], W.[OPT_REQ_WH],
-                        W.[MAX_DAILY_SALE], W.[ALLOC_FLAG],
-                        W.[PRI_CT%], W.[SEC_CT%],
-                        V.[ARTICLE_NUMBER] AS VAR_ART,
-                        V.[ARTICLE_DESC] AS VAR_DESC,
-                        V.[SZ],
-                        V.[MRP],
-                        V.[PAK_SZ],
-                        TRY_CAST(V.[FNL_Q] AS FLOAT) AS FNL_Q,
-                        TRY_CAST(V.[STK_QTY] AS FLOAT) AS STK_QTY,
-                        TRY_CAST(V.[PEND_QTY] AS FLOAT) AS PEND_QTY,
-                        V.[RDC] AS VAR_RDC,
-                        V.[FAB] AS VAR_FAB,
-                        V.[SSN] AS VAR_SSN
-                    INTO [{ALLOC_TABLE}]
-                    FROM [{FINAL_TABLE}] W
-                    INNER JOIN [ARS_MSA_VAR_ART] V WITH (NOLOCK)
-                        ON  W.[MAJ_CAT] = LTRIM(RTRIM(CAST(V.[MAJ_CAT] AS NVARCHAR(200))))
-                        AND W.[GEN_ART_NUMBER] = TRY_CAST(TRY_CAST(V.[GEN_ART_NUMBER] AS FLOAT) AS BIGINT)
-                        AND W.[CLR] = LTRIM(RTRIM(CAST(V.[CLR] AS NVARCHAR(200))))
-                        AND LTRIM(RTRIM(CAST(W.[RDC] AS NVARCHAR(50)))) = LTRIM(RTRIM(CAST(V.[RDC] AS NVARCHAR(50))))
-                    WHERE W.[ALLOC_FLAG] = 1
-                      AND TRY_CAST(V.[FNL_Q] AS FLOAT) > 0
-                """)
-                alloc_rows = ac.execute(text(f"SELECT COUNT(*) FROM [{ALLOC_TABLE}]")).scalar()
-                logger.info(f"{ALLOC_TABLE}: {alloc_rows} rows (ALLOC_FLAG=1 × VAR_ART FNL_Q>0)")
-
-                # ── Add STK_TTL fresh from variant-article-level grid ──────
-                # Source: ARS_GRID_MJ_VAR_ART (hierarchy: WERKS, MAJ_CAT, VAR_ART).
-                # The option-level STK_TTL was intentionally excluded above —
-                # this column is added here as a fresh variant-level value.
-                VAR_GRID = "ARS_GRID_MJ_VAR_ART"
-                # Always create the column (defaults to 0 if grid is unavailable)
-                try:
-                    _run(ac, f"ALTER TABLE [{ALLOC_TABLE}] ADD [STK_TTL] FLOAT NULL")
-                except Exception:
-                    pass
-                if _table_exists(ac, VAR_GRID):
-                    try:
-                        gcols = {c.upper() for c in _get_columns(ac, VAR_GRID)}
-                        var_art_col = next((c for c in ("VAR_ART", "ARTICLE_NUMBER", "GEN_ART") if c in gcols), None)
-                        if "STK_TTL" in gcols and "WERKS" in gcols and "MAJ_CAT" in gcols and var_art_col:
-                            _run(ac, f"""
-                                UPDATE A SET A.[STK_TTL] = TRY_CAST(G.[STK_TTL] AS FLOAT)
-                                FROM [{ALLOC_TABLE}] A
-                                INNER JOIN [{VAR_GRID}] G WITH (NOLOCK)
-                                    ON  G.[WERKS] = A.[WERKS]
-                                    AND G.[MAJ_CAT] = A.[MAJ_CAT]
-                                    AND TRY_CAST(G.[{var_art_col}] AS BIGINT) = TRY_CAST(A.[VAR_ART] AS BIGINT)
-                            """)
-                            # Rows with no match in the variant-grid → 0 (no variant stock)
-                            _run(ac, f"UPDATE [{ALLOC_TABLE}] SET [STK_TTL] = 0 WHERE [STK_TTL] IS NULL")
-                            matched = ac.execute(text(
-                                f"SELECT COUNT(*) FROM [{ALLOC_TABLE}] WHERE [STK_TTL] > 0"
-                            )).scalar()
-                            logger.info(f"{ALLOC_TABLE}: STK_TTL set from {VAR_GRID} (var_col={var_art_col}); {matched}/{alloc_rows} rows have stock>0")
-                        else:
-                            _run(ac, f"UPDATE [{ALLOC_TABLE}] SET [STK_TTL] = 0 WHERE [STK_TTL] IS NULL")
-                            logger.warning(f"{ALLOC_TABLE}: {VAR_GRID} missing required cols (WERKS/MAJ_CAT/STK_TTL/variant-art); STK_TTL set to 0")
-                    except Exception as se:
-                        _run(ac, f"UPDATE [{ALLOC_TABLE}] SET [STK_TTL] = 0 WHERE [STK_TTL] IS NULL")
-                        logger.warning(f"{ALLOC_TABLE}: variant-level STK_TTL load failed: {se}")
-                else:
-                    _run(ac, f"UPDATE [{ALLOC_TABLE}] SET [STK_TTL] = 0 WHERE [STK_TTL] IS NULL")
-                    logger.info(f"{ALLOC_TABLE}: {VAR_GRID} not found; STK_TTL set to 0")
-
-                # ── Size-level CONT from Master_CONT_SZ ────────────────────
-                # Join on WERKS + MAJ_CAT + SZ (store-level), with CO-level fallback.
-                # Then compute SZ_MBQ = OPT_MBQ × CONT
-                #              SZ_REQ = ROUND(MAX(SZ_MBQ - STK_TTL, 0), 0)
-                if _table_exists(ac, "Master_CONT_SZ"):
-                    for col, typ in (("CONT", "FLOAT"), ("SZ_MBQ", "FLOAT"), ("SZ_REQ", "FLOAT")):
-                        try:
-                            _run(ac, f"ALTER TABLE [{ALLOC_TABLE}] ADD [{col}] {typ} NULL")
-                        except Exception:
-                            pass
-                    try:
-                        # Store-level CONT
-                        _run(ac, f"""
-                            UPDATE A SET A.[CONT] = TRY_CAST(M.[CONT] AS FLOAT)
-                            FROM [{ALLOC_TABLE}] A
-                            INNER JOIN [Master_CONT_SZ] M WITH (NOLOCK)
-                                ON  LTRIM(RTRIM(CAST(M.[ST_CD] AS NVARCHAR(50)))) = LTRIM(RTRIM(CAST(A.[WERKS] AS NVARCHAR(50))))
-                                AND LTRIM(RTRIM(CAST(M.[MAJ_CAT] AS NVARCHAR(200)))) = A.[MAJ_CAT]
-                                AND LTRIM(RTRIM(CAST(M.[SZ] AS NVARCHAR(200)))) = LTRIM(RTRIM(CAST(A.[SZ] AS NVARCHAR(200))))
-                        """)
-                        # CO-level fallback for missing CONT
-                        _run(ac, f"""
-                            UPDATE A SET A.[CONT] = TRY_CAST(M.[CONT] AS FLOAT)
-                            FROM [{ALLOC_TABLE}] A
-                            INNER JOIN [Master_CONT_SZ] M WITH (NOLOCK)
-                                ON  LTRIM(RTRIM(CAST(M.[ST_CD] AS NVARCHAR(50)))) = 'CO'
-                                AND LTRIM(RTRIM(CAST(M.[MAJ_CAT] AS NVARCHAR(200)))) = A.[MAJ_CAT]
-                                AND LTRIM(RTRIM(CAST(M.[SZ] AS NVARCHAR(200)))) = LTRIM(RTRIM(CAST(A.[SZ] AS NVARCHAR(200))))
-                            WHERE A.[CONT] IS NULL
-                        """)
-                        # Auto-generate fallback: if CONT is still NULL or 0,
-                        # set CONT = 1 / COUNT(sizes) per (WERKS, MAJ_CAT).
-                        # Equal distribution across all sizes for that store × category.
-                        _run(ac, f"""
-                            ;WITH SzCount AS (
-                                SELECT [WERKS], [MAJ_CAT], COUNT(DISTINCT [SZ]) AS sz_cnt
-                                FROM [{ALLOC_TABLE}]
-                                GROUP BY [WERKS], [MAJ_CAT]
-                            )
-                            UPDATE A SET A.[CONT] = ROUND(1.0 / NULLIF(C.sz_cnt, 0), 4)
-                            FROM [{ALLOC_TABLE}] A
-                            INNER JOIN SzCount C ON A.[WERKS] = C.[WERKS] AND A.[MAJ_CAT] = C.[MAJ_CAT]
-                            WHERE ISNULL(A.[CONT], 0) = 0
-                        """)
-                        auto_cnt = ac.execute(text(
-                            f"SELECT COUNT(*) FROM [{ALLOC_TABLE}] "
-                            f"WHERE [CONT] IS NOT NULL AND [CONT] > 0"
-                        )).scalar() or 0
-                        null_cnt = ac.execute(text(
-                            f"SELECT COUNT(*) FROM [{ALLOC_TABLE}] WHERE ISNULL([CONT], 0) = 0"
-                        )).scalar() or 0
-                        if null_cnt == 0:
-                            logger.info(f"{ALLOC_TABLE}: CONT — all {auto_cnt} rows have values (store/CO/auto-generated)")
-                        else:
-                            logger.warning(f"{ALLOC_TABLE}: CONT — {auto_cnt} rows OK, {null_cnt} still 0")
-                        # SZ_MBQ = OPT_MBQ × CONT;  SZ_REQ = ROUND(MAX(SZ_MBQ - STK_TTL, 0), 0)
-                        _run(ac, f"""
-                            UPDATE [{ALLOC_TABLE}]
-                            SET [SZ_MBQ] = ISNULL([OPT_MBQ], 0) * ISNULL([CONT], 0),
-                                [SZ_REQ] = CASE
-                                    WHEN (ISNULL([OPT_MBQ], 0) * ISNULL([CONT], 0)) - ISNULL([STK_TTL], 0) > 0
-                                        THEN ROUND((ISNULL([OPT_MBQ], 0) * ISNULL([CONT], 0)) - ISNULL([STK_TTL], 0), 0)
-                                    ELSE 0
-                                END
-                        """)
-                        cont_rows = ac.execute(text(
-                            f"SELECT COUNT(*) FROM [{ALLOC_TABLE}] WHERE [CONT] IS NOT NULL"
-                        )).scalar()
-                        logger.info(f"{ALLOC_TABLE}: CONT applied ({cont_rows}/{alloc_rows} rows), SZ_MBQ + SZ_REQ calculated")
-                    except Exception as ce:
-                        logger.warning(f"{ALLOC_TABLE}: CONT/SZ_MBQ/SZ_REQ failed: {ce}")
-                else:
-                    # No Master_CONT_SZ table — auto-generate CONT = 1/COUNT(SZ) for all rows
-                    logger.info(f"{ALLOC_TABLE}: Master_CONT_SZ not found — auto-generating CONT = 1/COUNT(SZ)")
-                    for col, typ in (("CONT", "FLOAT"), ("SZ_MBQ", "FLOAT"), ("SZ_REQ", "FLOAT")):
-                        try:
-                            _run(ac, f"ALTER TABLE [{ALLOC_TABLE}] ADD [{col}] {typ} NULL")
-                        except Exception:
-                            pass
-                    try:
-                        _run(ac, f"""
-                            ;WITH SzCount AS (
-                                SELECT [WERKS], [MAJ_CAT], COUNT(DISTINCT [SZ]) AS sz_cnt
-                                FROM [{ALLOC_TABLE}]
-                                GROUP BY [WERKS], [MAJ_CAT]
-                            )
-                            UPDATE A SET A.[CONT] = ROUND(1.0 / NULLIF(C.sz_cnt, 0), 4)
-                            FROM [{ALLOC_TABLE}] A
-                            INNER JOIN SzCount C ON A.[WERKS] = C.[WERKS] AND A.[MAJ_CAT] = C.[MAJ_CAT]
-                        """)
-                        _run(ac, f"""
-                            UPDATE [{ALLOC_TABLE}]
-                            SET [SZ_MBQ] = ISNULL([OPT_MBQ], 0) * ISNULL([CONT], 0),
-                                [SZ_REQ] = CASE
-                                    WHEN (ISNULL([OPT_MBQ], 0) * ISNULL([CONT], 0)) - ISNULL([STK_TTL], 0) > 0
-                                        THEN ROUND((ISNULL([OPT_MBQ], 0) * ISNULL([CONT], 0)) - ISNULL([STK_TTL], 0), 0)
-                                    ELSE 0
-                                END
-                        """)
-                        logger.info(f"{ALLOC_TABLE}: auto-generated CONT + SZ_MBQ + SZ_REQ (no Master_CONT_SZ)")
-                    except Exception as ce:
-                        logger.warning(f"{ALLOC_TABLE}: auto-generate CONT failed: {ce}")
-
-                # ── ALLOC_QTY: WATERFALL allocation (sequential pool consumption) ──
-                # FNL_Q is a SHARED pool per (RDC, MAJ_CAT, GEN_ART_NUMBER, CLR,
-                # VAR_ART, SZ) — every store with that RDC competes for the same
-                # variant stock. Naive MIN(FNL_Q, SZ_REQ) double-counts: each
-                # store sees the full pool. The fix:
-                #   1. Order stores within the pool by ST_RANK ASC (best store first)
-                #   2. Track cumulative demand of preceding stores (prev_demand)
-                #   3. ALLOC_QTY = MIN(SZ_REQ, FNL_Q - prev_demand), floored at 0
-                # Same fix at GEN_ART/option level handled by the SUM-reflection
-                # downstream (since variant-level exhaustion implicitly caps the
-                # option-level total per store).
-                try:
-                    try:
-                        _run(ac, f"ALTER TABLE [{ALLOC_TABLE}] ADD [ALLOC_QTY] FLOAT NULL")
-                    except Exception:
-                        pass
-                    for col in ("PREV_ALLOC", "FNL_Q_REM"):
-                        try:
-                            _run(ac, f"ALTER TABLE [{ALLOC_TABLE}] ADD [{col}] FLOAT NULL")
-                        except Exception:
-                            pass
-                    _run(ac, f"""
-                        ;WITH PoolDemand AS (
-                            SELECT
-                                [WERKS], [RDC], [MAJ_CAT], [GEN_ART_NUMBER], [CLR], [VAR_ART], [SZ],
-                                ISNULL([FNL_Q], 0) AS FNL_Q,
-                                ISNULL([SZ_REQ], 0) AS SZ_REQ,
-                                SUM(ISNULL([SZ_REQ], 0)) OVER (
-                                    PARTITION BY [RDC], [MAJ_CAT], [GEN_ART_NUMBER], [CLR], [VAR_ART], [SZ]
-                                    ORDER BY ISNULL([ST_RANK], 999999) ASC, [WERKS]
-                                    ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
-                                ) AS prev_demand
-                            FROM [{ALLOC_TABLE}]
-                        ),
-                        Allocated AS (
-                            SELECT *,
-                                CASE
-                                    WHEN FNL_Q - ISNULL(prev_demand, 0) <= 0 THEN 0
-                                    WHEN SZ_REQ <= FNL_Q - ISNULL(prev_demand, 0) THEN SZ_REQ
-                                    ELSE FNL_Q - ISNULL(prev_demand, 0)
-                                END AS new_alloc
-                            FROM PoolDemand
-                        )
-                        UPDATE A SET
-                            A.[PREV_ALLOC] = ISNULL(P.prev_demand, 0),
-                            A.[ALLOC_QTY]  = P.new_alloc,
-                            A.[FNL_Q_REM]  = CASE
-                                WHEN P.FNL_Q - ISNULL(P.prev_demand, 0) - P.new_alloc < 0 THEN 0
-                                ELSE P.FNL_Q - ISNULL(P.prev_demand, 0) - P.new_alloc
-                            END
-                        FROM [{ALLOC_TABLE}] A
-                        INNER JOIN Allocated P
-                            ON  A.[WERKS] = P.[WERKS]
-                            AND A.[RDC] = P.[RDC]
-                            AND A.[MAJ_CAT] = P.[MAJ_CAT]
-                            AND A.[GEN_ART_NUMBER] = P.[GEN_ART_NUMBER]
-                            AND A.[CLR] = P.[CLR]
-                            AND A.[VAR_ART] = P.[VAR_ART]
-                            AND A.[SZ] = P.[SZ]
-                    """)
-                    # Diagnostic: how many rows got 0 due to pool exhaustion?
-                    starved = ac.execute(text(
-                        f"SELECT COUNT(*) FROM [{ALLOC_TABLE}] "
-                        f"WHERE ISNULL([SZ_REQ],0) > 0 AND ISNULL([ALLOC_QTY],0) = 0"
-                    )).scalar()
-                    logger.info(f"{ALLOC_TABLE}: ALLOC_QTY waterfall applied (ST_RANK order); "
-                                f"{starved} rows starved (had demand but pool exhausted by higher-rank stores)")
-                    # Reflect option-level ALLOC_QTY (SUM of size-level) into LISTING_WORKING
-                    try:
-                        _run(ac, f"ALTER TABLE [{FINAL_TABLE}] ADD [ALLOC_QTY] FLOAT NULL")
-                    except Exception:
-                        pass
-                    _run(ac, f"""
-                        UPDATE W SET W.[ALLOC_QTY] = A.[TOT_ALLOC]
-                        FROM [{FINAL_TABLE}] W
-                        INNER JOIN (
-                            SELECT [WERKS], [RDC], [MAJ_CAT], [GEN_ART_NUMBER], [CLR],
-                                   SUM(ISNULL([ALLOC_QTY], 0)) AS TOT_ALLOC
-                            FROM [{ALLOC_TABLE}]
-                            GROUP BY [WERKS], [RDC], [MAJ_CAT], [GEN_ART_NUMBER], [CLR]
-                        ) A
-                            ON  W.[WERKS] = A.[WERKS]
-                            AND W.[RDC] = A.[RDC]
-                            AND W.[MAJ_CAT] = A.[MAJ_CAT]
-                            AND W.[GEN_ART_NUMBER] = A.[GEN_ART_NUMBER]
-                            AND W.[CLR] = A.[CLR]
-                    """)
-                    logger.info(f"{ALLOC_TABLE}: ALLOC_QTY (waterfall) reflected to {FINAL_TABLE} as option-level SUM")
-                except Exception as qe:
-                    logger.warning(f"{ALLOC_TABLE}: ALLOC_QTY failed: {qe}")
-            else:
-                logger.info(f"Skipped {ALLOC_TABLE}: missing {FINAL_TABLE} or ARS_MSA_VAR_ART")
+            alloc_result = run_multilevel_allocation(
+                conn=ac,
+                final_table=FINAL_TABLE,
+                alloc_table=ALLOC_TABLE,
+                threshold=req.stock_threshold_pct,
+                enable_fallback=getattr(req, 'enable_fallback', False),
+            )
+            alloc_rows = alloc_result.get("alloc_rows", 0)
     except Exception as e:
-        logger.warning(f"Auto-create {ALLOC_TABLE} failed: {e}")
+        logger.warning(f"Multi-level allocation failed: {e}")
+    t0 = _time_step(f"Part 8 (Multi-level allocation → {alloc_rows} alloc rows)", t0)
 
     duration = round(time.time() - start, 1)
     logger.info(f"ARS_LISTING: {total} rows (grid={grid_count}, new={new_count}) in {duration}s")
@@ -2216,7 +1973,27 @@ def listing_summary(current_user: User = Depends(get_current_user)):
             FROM [{LISTING_TABLE}]
             GROUP BY [RDC] ORDER BY [RDC]
         """)).fetchall()
-        summary["by_rdc"] = [{"rdc": r[0], "total": r[1], "new": r[2], "existing": r[3]} for r in rows]
+        by_rdc = {r[0]: {"rdc": r[0], "total": r[1], "new": r[2], "existing": r[3], "alloc_qty": 0}
+                  for r in rows}
+
+        # Allocated qty from ARS_LISTING_WORKING.ALLOC_QTY (actual allocation output)
+        WORKING_TABLE = "ARS_LISTING_WORKING"
+        if _table_exists(conn, WORKING_TABLE):
+            wk_cols = _get_columns(conn, WORKING_TABLE)
+            if "ALLOC_QTY" in wk_cols and "RDC" in wk_cols:
+                alloc_rows = conn.execute(text(f"""
+                    SELECT [RDC], ISNULL(SUM(TRY_CAST([ALLOC_QTY] AS FLOAT)), 0) AS aq
+                    FROM [{WORKING_TABLE}]
+                    GROUP BY [RDC]
+                """)).fetchall()
+                for ar in alloc_rows:
+                    rdc_key = ar[0]
+                    if rdc_key in by_rdc:
+                        by_rdc[rdc_key]["alloc_qty"] = round(ar[1] or 0)
+                    else:
+                        by_rdc[rdc_key] = {"rdc": rdc_key, "total": 0, "new": 0, "existing": 0, "alloc_qty": round(ar[1] or 0)}
+
+        summary["by_rdc"] = sorted(by_rdc.values(), key=lambda x: x["rdc"])
 
         rows = conn.execute(text(f"""
             SELECT TOP 20 [MAJ_CAT], COUNT(*) AS cnt,
@@ -2257,6 +2034,19 @@ def listing_summary(current_user: User = Depends(get_current_user)):
                 GROUP BY [OPT_TYPE]
             """)).fetchall()
             summary["by_opt_type"] = {r[0]: r[1] for r in opt_rows}
+
+        # Alloc qty by OPT_TYPE from ARS_LISTING_WORKING
+        WORKING_TABLE = "ARS_LISTING_WORKING"
+        if _table_exists(conn, WORKING_TABLE):
+            wk_cols = _get_columns(conn, WORKING_TABLE)
+            if "ALLOC_QTY" in wk_cols and "OPT_TYPE" in wk_cols:
+                alloc_opt_rows = conn.execute(text(f"""
+                    SELECT ISNULL([OPT_TYPE], 'UNTAGGED') AS opt,
+                           ROUND(ISNULL(SUM(TRY_CAST([ALLOC_QTY] AS FLOAT)), 0), 0) AS aq
+                    FROM [{WORKING_TABLE}]
+                    GROUP BY [OPT_TYPE]
+                """)).fetchall()
+                summary["alloc_by_opt_type"] = {r[0]: round(r[1] or 0) for r in alloc_opt_rows}
 
     return {"success": True, "data": summary}
 

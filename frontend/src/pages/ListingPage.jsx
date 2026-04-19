@@ -197,6 +197,7 @@ export default function ListingPage() {
   const [ageThreshold, setAgeThreshold] = useState(15)              // AGE < X → use PER_OPT_SALE
   const [reqWeight, setReqWeight] = useState(0.4)                   // Store ranking: req weight
   const [fillWeight, setFillWeight] = useState(0.6)                 // Store ranking: fill weight
+  const [enableFallback, setEnableFallback] = useState(false)       // Fallback allocation (grid demotion)
 
   // (Async/job/cancel facility removed — listing runs synchronously again)
 
@@ -216,6 +217,7 @@ export default function ListingPage() {
         if (s.run_mode) setRunMode(s.run_mode)
         if (s.req_weight) setReqWeight(parseFloat(s.req_weight))
         if (s.fill_weight) setFillWeight(parseFloat(s.fill_weight))
+        if (s.enable_fallback !== undefined) setEnableFallback(s.enable_fallback === 'true' || s.enable_fallback === true)
       }
     } catch { toast.error('Failed to load config') }
   }, [])
@@ -249,6 +251,7 @@ export default function ListingPage() {
         age_threshold: parseInt(ageThreshold, 10) || 15,
         req_weight: parseFloat(reqWeight) || 0.4,
         fill_weight: parseFloat(fillWeight) || 0.6,
+        enable_fallback: !!enableFallback,
       }
       if (rdcMode === 'own') {
         payload.rdc_values = autoRdcs
@@ -421,6 +424,37 @@ export default function ListingPage() {
                 ))}
               </div>
             )}
+            {summary.by_rdc?.length > 0 && summary.by_rdc.some(r => r.alloc_qty > 0) && (
+              <div style={{ marginTop: 4, paddingTop: 4, borderTop: '1px solid #f1f5f9', fontSize: 8 }}>
+                <div style={{ fontWeight: 700, color: C.textSub, marginBottom: 2 }}>ALLOC QTY / RDC</div>
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                  {summary.by_rdc.filter(r => r.alloc_qty > 0).map(r => (
+                    <span key={r.rdc} style={{ color: C.text }}>
+                      <b style={{ color: C.primary }}>{r.rdc}</b>: {(r.alloc_qty||0).toLocaleString()}
+                    </span>
+                  ))}
+                  <span style={{ color: C.green, fontWeight: 700 }}>
+                    Total: {summary.by_rdc.reduce((s, r) => s + (r.alloc_qty || 0), 0).toLocaleString()}
+                  </span>
+                </div>
+              </div>
+            )}
+            {summary.alloc_by_opt_type && Object.values(summary.alloc_by_opt_type).some(v => v > 0) && (
+              <div style={{ marginTop: 4, paddingTop: 4, borderTop: '1px solid #f1f5f9', fontSize: 8 }}>
+                <div style={{ fontWeight: 700, color: C.textSub, marginBottom: 2 }}>ALLOC QTY / TYPE</div>
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                  {Object.entries(summary.alloc_by_opt_type).filter(([,v]) => v > 0).map(([t, n]) => (
+                    <span key={t} style={{ fontWeight: 700,
+                      color: t === 'RL' ? C.green : t === 'TBL' ? C.blue : t === 'TBC' ? C.amber : t === 'MIX' ? C.red : C.textMuted }}>
+                      {t}: {(n||0).toLocaleString()}
+                    </span>
+                  ))}
+                  <span style={{ color: C.green, fontWeight: 700 }}>
+                    Total: {Object.values(summary.alloc_by_opt_type).reduce((s, v) => s + (v || 0), 0).toLocaleString()}
+                  </span>
+                </div>
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -490,6 +524,18 @@ export default function ListingPage() {
                 <span style={{ fontSize: 7, color: C.textMuted }}>{hint}</span>
               </div>
             ))}
+            {/* Fallback toggle */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginLeft: 4,
+              cursor: 'pointer', userSelect: 'none' }}
+              onClick={() => setEnableFallback(f => !f)}>
+              <div style={{ width: 14, height: 14, borderRadius: 3,
+                border: `2px solid ${enableFallback ? C.primary : C.textMuted}`,
+                background: enableFallback ? C.primary : 'transparent',
+                display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                {enableFallback && <span style={{ color: '#fff', fontSize: 10, fontWeight: 700, lineHeight: 1 }}>✓</span>}
+              </div>
+              <span style={{ fontSize: 8, color: enableFallback ? C.primary : C.textSub, fontWeight: enableFallback ? 700 : 400 }}>Fallback</span>
+            </div>
           </div>
         </div>
 
