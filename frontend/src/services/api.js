@@ -59,6 +59,12 @@ export const authAPI = {
   changePassword: (data) => api.post('/auth/change-password', data),
 }
 
+// ============== Process Docs ==============
+export const processAPI = {
+  list: () => api.get('/process/list'),
+  get: (name) => api.get(`/process/get/${name}`),
+}
+
 // ============== Users ==============
 export const usersAPI = {
   list: (params) => api.get('/users', { params }),
@@ -294,7 +300,7 @@ export const gridBuilderAPI = {
 // ============== Listing (Data Preparation) ==============
 export const listingAPI = {
   config:       ()       => api.get('/listing/config'),
-  generate:     (data)   => api.post('/listing/generate', data, { timeout: 600000 }),
+  generate:     (data, opts) => api.post('/listing/generate', data, { timeout: 600000, ...opts }),
   preview:      (params) => api.get('/listing/preview', { params }),
   summary:      ()       => api.get('/listing/summary'),
   export:       (params) => api.get('/listing/export', { params, responseType: 'blob', timeout: 600000 }),
@@ -398,6 +404,20 @@ export const trendsAPI = {
   truncateTable:   (name)                => api.post(`/trends/admin/truncate/${encodeURIComponent(name)}`),
   dropTable:       (name)                => api.delete(`/trends/admin/drop/${encodeURIComponent(name)}`),
   alterColumns:    (name, data)          => api.put(`/trends/admin/${encodeURIComponent(name)}/columns`, data),
+}
+
+// ============== Maintenance (superadmin only) ==============
+export const maintenanceAPI = {
+  tempdbStatus:    ()          => api.get('/maintenance/tempdb/status'),
+  tempdbSize:      ()          => api.get('/maintenance/tempdb/size'),
+  tempdbHistory:   ()          => api.get('/maintenance/tempdb/history'),
+  tempdbSessions:  ()          => api.get('/maintenance/tempdb/sessions'),
+  tempdbCleanup:   (dryRun=false) =>
+    api.post('/maintenance/tempdb/cleanup', null, { params: { dry_run: dryRun } }),
+  tempdbAggressiveShrink: ()   => api.post('/maintenance/tempdb/aggressive-shrink', null, { timeout: 600000 }),
+  tempdbClearAlert: ()         => api.post('/maintenance/tempdb/alert/clear'),
+  tempdbLongTransactions: ()   => api.get('/maintenance/tempdb/long-transactions'),
+  tempdbKillSession: (sid)     => api.post(`/maintenance/tempdb/kill-session/${sid}`),
 }
 
 // ============== Reports ==============

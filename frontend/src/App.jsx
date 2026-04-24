@@ -40,6 +40,8 @@ const TrendUploadPage        = lazy(() => import('@/pages/TrendUploadPage'))
 const TrendReviewPage        = lazy(() => import('@/pages/TrendReviewPage'))
 const TrendAdminPage         = lazy(() => import('@/pages/TrendAdminPage'))
 const TrendDashboardPage     = lazy(() => import('@/pages/TrendDashboardPage'))
+const ProcessPage            = lazy(() => import('@/pages/ProcessPage'))
+const TempDBAdminPage        = lazy(() => import('@/pages/TempDBAdminPage'))
 
 function PageLoader() {
   return (
@@ -118,6 +120,7 @@ export default function App() {
         <Route path="data-prep/store-stock" element={<ProtectedRoute permission="GRID_VIEW"><GridBuilderPage /></ProtectedRoute>} />
         <Route path="data-prep/lookup-art-master" element={<ProtectedRoute permission="LOOKUP_VIEW"><LookupArtMasterPage /></ProtectedRoute>} />
         <Route path="data-prep/listing" element={<ErrorBoundary><ListingPage /></ErrorBoundary>} />
+        <Route path="process" element={<ErrorBoundary><ProcessPage /></ErrorBoundary>} />
         {/* Trends */}
         <Route path="trends/dashboard" element={<ProtectedRoute permission="TRENDS_DASHBOARD"><ErrorBoundary><TrendDashboardPage /></ErrorBoundary></ProtectedRoute>} />
         <Route path="trends/upload" element={<ProtectedRoute permission="TRENDS_UPLOAD"><ErrorBoundary><TrendUploadPage /></ErrorBoundary></ProtectedRoute>} />
@@ -136,6 +139,7 @@ export default function App() {
         <Route path="settings/roles" element={<ProtectedRoute permission="ADMIN_ROLES_MANAGE"><RolesPage /></ProtectedRoute>} />
         <Route path="settings/rls" element={<ProtectedRoute permission="ADMIN_RLS_MANAGE"><RLSPage /></ProtectedRoute>} />
         <Route path="settings/audit" element={<ProtectedRoute permission="ADMIN_AUDIT_READ"><AuditPage /></ProtectedRoute>} />
+        <Route path="settings/tempdb" element={<ErrorBoundary><TempDBAdminPage /></ErrorBoundary>} />
         {/* Legacy routes - redirect to new paths */}
         <Route path="admin/users" element={<Navigate to="/settings/users" replace />} />
         <Route path="admin/roles" element={<Navigate to="/settings/roles" replace />} />

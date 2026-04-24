@@ -12,8 +12,8 @@ PRIORITY RULE for CO_MAJ_CAT vs ST_MAJ_CAT:
 STEPS:
   1. Create calc table (copy from ST_MAJ_CAT)
   2. Merge CO_MAJ_CAT values (apply to all stores)
-  3. Apply defaults: LISTING, I_ROD, growth rates, CLR/DPN
-  4. Calculate SAL_D (total sale days)
+  3. Apply defaults: LISTING, I_ROD, growth rates, CLR/ACS_D
+  4. Calculate ALC_D (total sale days)
   5. Calculate SAL_PD (per day sale)
 
 To change column names or logic → edit below and restart backend.
@@ -60,11 +60,11 @@ COL_LW_ACT_GR   = "LW_ACT_SL_GR_DGR"
 COL_BGT_SL_GR   = "BGT_SL_GR_DGR"
 COL_CLR_MIN     = "CLR_MIN"
 COL_CLR_MAX     = "CLR_MAX"
-COL_DPN         = "DPN"
+COL_DPN         = "ACS_D"
 COL_DISP_Q      = "DISP_Q"
 
 # Output columns
-COL_SAL_D       = "SAL_D"
+COL_SAL_D       = "ALC_D"
 COL_SAL_PD      = "SAL_PD"
 COL_SRC         = "SALE_COVER_SRC"
 
@@ -371,16 +371,16 @@ def _step_defaults(conn, steps):
 
 
 # ==========================================================================
-# STEP 4: CALCULATE SAL_D (Total Sale Days)
+# STEP 4: CALCULATE ALC_D (Total Sale Days)
 # ==========================================================================
 def _step_sal_d(conn, steps):
-    """SAL_D = INT_DAYS + PRD_DAYS + SL_CVR (priority: ST_MAJ > CO_MAJ > ST_MASTER)."""
+    """ALC_D = INT_DAYS + PRD_DAYS + SL_CVR (priority: ST_MAJ > CO_MAJ > ST_MASTER)."""
     CALC    = TABLES["CALC"]
     ST_MAST = TABLES["ST_MAST"]
     CO_MAJ  = TABLES["CO_MAJ"]
 
     if not _exists(conn, ST_MAST):
-        steps.append({"step": "SAL_D", "detail": f"{ST_MAST} not found", "status": "skip"})
+        steps.append({"step": "ALC_D", "detail": f"{ST_MAST} not found", "status": "skip"})
         return
 
     _ensure_col(conn, CALC, COL_SAL_D)
@@ -395,9 +395,9 @@ def _step_sal_d(conn, steps):
             INNER JOIN [{ST_MAST}] S WITH (NOLOCK) ON C.[ST_CD]=S.[ST_CD]
         """)
         cnt = conn.execute(text(f"SELECT COUNT(*) FROM [{CALC}] WHERE [{COL_SAL_D}]>0")).scalar()
-        steps.append({"step": "SAL_D (ST_MASTER)", "detail": f"{cnt} rows", "status": "ok"})
+        steps.append({"step": "ALC_D (ST_MASTER)", "detail": f"{cnt} rows", "status": "ok"})
     except Exception as e:
-        steps.append({"step": "SAL_D (ST_MASTER)", "detail": str(e)[:150], "status": "error"})
+        steps.append({"step": "ALC_D (ST_MASTER)", "detail": str(e)[:150], "status": "error"})
         return
 
     # Priority 2: CO_MAJ_CAT override
@@ -412,9 +412,9 @@ def _step_sal_d(conn, steps):
                 WHERE CO.[{COL_SL_CVR}] IS NOT NULL AND CO.[{COL_SL_CVR}] > 0
             """)
             cnt = conn.execute(text(f"SELECT COUNT(*) FROM [{CALC}] WHERE [{COL_SRC}]='CO_MAJ_CAT'")).scalar()
-            steps.append({"step": "SAL_D (CO_MAJ_CAT)", "detail": f"Override {cnt} rows", "status": "ok"})
+            steps.append({"step": "ALC_D (CO_MAJ_CAT)", "detail": f"Override {cnt} rows", "status": "ok"})
         except Exception as e:
-            steps.append({"step": "SAL_D (CO_MAJ_CAT)", "detail": str(e)[:150], "status": "error"})
+            steps.append({"step": "ALC_D (CO_MAJ_CAT)", "detail": str(e)[:150], "status": "error"})
 
     # Priority 1: ST_MAJ_CAT own SL_CVR (highest priority)
     if _col_exists(conn, CALC, COL_SL_CVR):
@@ -427,9 +427,9 @@ def _step_sal_d(conn, steps):
                 WHERE C.[{COL_SL_CVR}] IS NOT NULL AND C.[{COL_SL_CVR}] > 0
             """)
             cnt = conn.execute(text(f"SELECT COUNT(*) FROM [{CALC}] WHERE [{COL_SRC}]='ST_MAJ_CAT'")).scalar()
-            steps.append({"step": "SAL_D (ST_MAJ_CAT)", "detail": f"Override {cnt} rows", "status": "ok"})
+            steps.append({"step": "ALC_D (ST_MAJ_CAT)", "detail": f"Override {cnt} rows", "status": "ok"})
         except Exception as e:
-            steps.append({"step": "SAL_D (ST_MAJ_CAT)", "detail": str(e)[:150], "status": "error"})
+            steps.append({"step": "ALC_D (ST_MAJ_CAT)", "detail": str(e)[:150], "status": "error"})
 
 
 # ==========================================================================
@@ -605,7 +605,7 @@ def _step_create_calc_art(conn, steps):
         steps.append({"step": "Create ART calc", "detail": "No valid source", "status": "skip"})
         return False
 
-    _ensure_col(conn, CALC, "SAL_D")
+    _ensure_col(conn, CALC, "ALC_D")
     _ensure_col(conn, CALC, "SAL_PD")
     _ensure_col(conn, CALC, "SALE_COVER_SRC", "NVARCHAR(50)")
 
@@ -699,7 +699,7 @@ def _step_overlay_st_art(conn, steps):
 
     st_art_key = _find_art_key(conn, ST_ART) or "GEN_ART_NUMBER"
     skip = {"ST_CD", "MAJ_CAT", "GEN_ART_NUMBER", st_art_key.upper(),
-            "CLR", "UPLOAD_DATETIME", "SAL_D", "SAL_PD", "SALE_COVER_SRC"} | _ART_DROP_COLS
+            "CLR", "UPLOAD_DATETIME", "ALC_D", "SAL_PD", "SALE_COVER_SRC"} | _ART_DROP_COLS
 
     # ── Add ST-only columns to CALC (excluding dropped cols) ─────
     added_cols = []
@@ -820,7 +820,7 @@ def _step_art_defaults(conn, steps):
         except Exception as e:
             logger.debug(f"ART Default {COL_MANUAL_DENSITY}: {e}")
 
-    # 5. DPN override: if MANUAL_DENSITY > 0, use it as DPN (article level)
+    # 5. ACS_D override: if MANUAL_DENSITY > 0, use it as ACS_D (article level)
     if _col_exists(conn, CALC, COL_MANUAL_DENSITY) and _col_exists(conn, CALC, COL_DPN):
         try:
             _run(conn, f"""
@@ -830,9 +830,9 @@ def _step_art_defaults(conn, steps):
             cnt = conn.execute(text(
                 f"SELECT COUNT(*) FROM [{CALC}] WHERE ISNULL(TRY_CAST([{COL_MANUAL_DENSITY}] AS FLOAT), 0) > 0"
             )).scalar()
-            applied.append(f"DPN overridden by {COL_MANUAL_DENSITY} for {cnt} rows")
+            applied.append(f"ACS_D overridden by {COL_MANUAL_DENSITY} for {cnt} rows")
         except Exception as e:
-            logger.debug(f"ART DPN override by {COL_MANUAL_DENSITY}: {e}")
+            logger.debug(f"ART ACS_D override by {COL_MANUAL_DENSITY}: {e}")
 
     # 6. FOCUS_W_CAP / FOCUS_WO_CAP: Y → 1, else → 0
     for col in ("FOCUS_W_CAP", "FOCUS_WO_CAP"):
@@ -853,37 +853,37 @@ def _step_art_defaults(conn, steps):
 
 
 def _step_art_sal_d(conn, steps):
-    """Step A3: SAL_D for article level — from ARS_CALC_ST_MAJ_CAT (already cascaded).
+    """Step A3: ALC_D for article level — from ARS_CALC_ST_MAJ_CAT (already cascaded).
 
-    ART table has no SL_CVR column. SAL_D is pulled directly from
+    ART table has no SL_CVR column. ALC_D is pulled directly from
     ARS_CALC_ST_MAJ_CAT which already has the correct cascaded value.
     """
     CALC  = ART_TABLES["CALC_ART"]
     MAJ_T = TABLES["CALC"]   # ARS_CALC_ST_MAJ_CAT
 
     if not _col_exists(conn, CALC, "ST_CD") or not _col_exists(conn, CALC, "MAJ_CAT"):
-        steps.append({"step": "ART SAL_D", "detail": "ST_CD or MAJ_CAT missing in ART calc", "status": "skip"})
+        steps.append({"step": "ART ALC_D", "detail": "ST_CD or MAJ_CAT missing in ART calc", "status": "skip"})
         return
     if not _exists(conn, MAJ_T) or not _col_exists(conn, MAJ_T, COL_SAL_D):
-        steps.append({"step": "ART SAL_D", "detail": f"{MAJ_T} or SAL_D not found", "status": "skip"})
+        steps.append({"step": "ART ALC_D", "detail": f"{MAJ_T} or ALC_D not found", "status": "skip"})
         return
 
-    _ensure_col(conn, CALC, "SAL_D")
+    _ensure_col(conn, CALC, "ALC_D")
     _ensure_col(conn, CALC, "SALE_COVER_SRC", "NVARCHAR(50)")
 
     try:
         _run(conn, f"""
             UPDATE C SET C.[SALE_COVER_SRC] = MJ.[{COL_SRC}],
-                C.[SAL_D] = MJ.[{COL_SAL_D}]
+                C.[ALC_D] = MJ.[{COL_SAL_D}]
             FROM [{CALC}] C
             INNER JOIN [{MAJ_T}] MJ WITH (NOLOCK)
                 ON C.[ST_CD] = MJ.[ST_CD] AND C.[MAJ_CAT] = MJ.[MAJ_CAT]
             WHERE MJ.[{COL_SAL_D}] IS NOT NULL AND MJ.[{COL_SAL_D}] > 0
         """)
-        cnt = conn.execute(text(f"SELECT COUNT(*) FROM [{CALC}] WHERE [SAL_D]>0")).scalar()
-        steps.append({"step": "ART SAL_D", "detail": f"{cnt} rows from {MAJ_T} (ST_CD+MAJ_CAT)", "status": "ok"})
+        cnt = conn.execute(text(f"SELECT COUNT(*) FROM [{CALC}] WHERE [ALC_D]>0")).scalar()
+        steps.append({"step": "ART ALC_D", "detail": f"{cnt} rows from {MAJ_T} (ST_CD+MAJ_CAT)", "status": "ok"})
     except Exception as e:
-        steps.append({"step": "ART SAL_D", "detail": str(e)[:150], "status": "error"})
+        steps.append({"step": "ART ALC_D", "detail": str(e)[:150], "status": "error"})
 
 
 def _step_art_sal_pd(conn, steps):
@@ -901,7 +901,7 @@ def _step_art_sal_pd(conn, steps):
 
     if not _exists(conn, ART_SALE):
         # Fallback: use same formula as MAJ_CAT if CM_SAL_Q columns exist in CALC
-        needed = [COL_CM_SAL_Q, COL_CM_REM_D, COL_NM_SAL_D, COL_NM_REM_D, "SAL_D"]
+        needed = [COL_CM_SAL_Q, COL_CM_REM_D, COL_NM_SAL_D, COL_NM_REM_D, "ALC_D"]
         missing = [c for c in needed if not _col_exists(conn, CALC, c)]
         if missing:
             steps.append({"step": "ART SAL_PD", "detail": f"{ART_SALE} not found, fallback missing: {missing}", "status": "skip"})
@@ -911,17 +911,17 @@ def _step_art_sal_pd(conn, steps):
                 UPDATE [{CALC}] SET [SAL_PD] =
                     CASE
                         WHEN ISNULL([{COL_CM_REM_D}],0)=0 THEN 0
-                        WHEN [{COL_CM_REM_D}] >= ISNULL([SAL_D],0) THEN
+                        WHEN [{COL_CM_REM_D}] >= ISNULL([ALC_D],0) THEN
                             CAST([{COL_CM_SAL_Q}] AS FLOAT) / [{COL_CM_REM_D}]
-                        WHEN ISNULL([SAL_D],0)=0 THEN 0
+                        WHEN ISNULL([ALC_D],0)=0 THEN 0
                         ELSE
                             CASE WHEN ISNULL([{COL_NM_REM_D}],0)=0 THEN
                                 CAST([{COL_CM_SAL_Q}] AS FLOAT) / [{COL_CM_REM_D}]
                             ELSE
                                 (CAST([{COL_CM_SAL_Q}] AS FLOAT)
                                  + (CAST([{COL_NM_SAL_D}] AS FLOAT) / [{COL_NM_REM_D}])
-                                   * ([SAL_D] - [{COL_CM_REM_D}])
-                                ) / [SAL_D]
+                                   * ([ALC_D] - [{COL_CM_REM_D}])
+                                ) / [ALC_D]
                             END
                     END
             """)
@@ -974,17 +974,17 @@ def _step_art_sal_pd(conn, steps):
             UPDATE C SET C.[SAL_PD] =
                 CASE
                     WHEN {cm_rem_expr}=0 THEN 0
-                    WHEN {cm_rem_expr} >= ISNULL(C.[SAL_D],0) THEN
+                    WHEN {cm_rem_expr} >= ISNULL(C.[ALC_D],0) THEN
                         CAST(SA.[{cm_sal}] AS FLOAT) / {cm_rem_expr}
-                    WHEN ISNULL(C.[SAL_D],0)=0 THEN 0
+                    WHEN ISNULL(C.[ALC_D],0)=0 THEN 0
                     ELSE
                         CASE WHEN {nm_rem_expr}=0 THEN
                             CAST(SA.[{cm_sal}] AS FLOAT) / {cm_rem_expr}
                         ELSE
                             (CAST(SA.[{cm_sal}] AS FLOAT)
                              + (CAST({nm_sal_expr} AS FLOAT) / {nm_rem_expr})
-                               * (C.[SAL_D] - {cm_rem_expr})
-                            ) / C.[SAL_D]
+                               * (C.[ALC_D] - {cm_rem_expr})
+                            ) / C.[ALC_D]
                         END
                 END
             FROM [{CALC}] C
@@ -1010,7 +1010,7 @@ def _step_art_sal_pd(conn, steps):
 #
 # Formula mirrors MAJ_CAT SAL_PD:
 #   - CM_SAL_Q / NM_SAL_Q  → from MASTER_GEN_ART_SALE (row itself)
-#   - CM_REM_D / NM_REM_D / SAL_D → from ARS_CALC_ST_MAJ_CAT (ST_CD + MAJ_CAT)
+#   - CM_REM_D / NM_REM_D / ALC_D → from ARS_CALC_ST_MAJ_CAT (ST_CD + MAJ_CAT)
 # ==========================================================================
 def _step_master_sale_sal_pd(conn, steps):
     SALE_T = "MASTER_GEN_ART_SALE"
@@ -1036,7 +1036,7 @@ def _step_master_sale_sal_pd(conn, steps):
 
     maj_cols = {c.upper() for c in [COL_CM_REM_D, COL_NM_REM_D, COL_SAL_D] if _col_exists(conn, MAJ_T, c)}
     if not {COL_CM_REM_D.upper(), COL_SAL_D.upper()}.issubset(maj_cols):
-        steps.append({"step": "MASTER SAL_PD", "detail": f"{MAJ_T} missing CM_REM_D or SAL_D", "status": "skip"})
+        steps.append({"step": "MASTER SAL_PD", "detail": f"{MAJ_T} missing CM_REM_D or ALC_D", "status": "skip"})
         return
 
     _ensure_col(conn, SALE_T, COL_SAL_PD)
@@ -1079,15 +1079,15 @@ def calculate_per_day_sale(conn) -> List[Dict[str, Any]]:
         1. Copy Master → ARS_CALC_ST_MAJ_CAT
         2. Merge CO_MAJ_CAT values
         3. Apply defaults
-        4. SAL_D (total sale days)
+        4. ALC_D (total sale days)
         5. SAL_PD (per day sale)
       MASTER_GEN_ART_SALE:
         M. SAL_PD computed in place (~21L rows — full option coverage
-           for listing AUTO_GEN_ART_SALE; REM_D/SAL_D from MAJ_CAT calc)
+           for listing AUTO_GEN_ART_SALE; REM_D/ALC_D from MAJ_CAT calc)
       ART level (mirrors MAJ_CAT flow):
         A1. Copy ST_ART → ARS_CALC_ST_ART (if ST_ART empty, cross-join stores × CO_ART)
         A2. Merge CO_ART values (CO overrides ST where CO has data)
-        A3. SAL_D (from ST_MASTER)
+        A3. ALC_D (from ST_MASTER)
         A4. SAL_PD (JOIN MASTER_GEN_ART_SALE for CM_SAL_Q/NM_SAL_Q + ST_MAJ_CAT for CM_REM_D/NM_REM_D)
     """
     steps = []

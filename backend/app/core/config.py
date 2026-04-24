@@ -36,6 +36,14 @@ class Settings(BaseSettings):
 
     DB_TEMPDB_CLEANUP_INTERVAL_MINUTES: int = 5
     DB_TEMPDB_ORPHAN_AGE_MINUTES: int = 15   # More room for long MSA runs
+    # Aggressive shrink triggers when total tempdb size exceeds this (MB)
+    DB_TEMPDB_AGGRESSIVE_THRESHOLD_MB: int = 20480      # 20 GB
+    # Log-level ALERT raised when size exceeds this (MB) — surfaced in UI
+    DB_TEMPDB_ALERT_THRESHOLD_MB: int = 40960           # 40 GB
+    # Target size per data file after aggressive shrink (MB)
+    DB_TEMPDB_AGGRESSIVE_TARGET_MB: int = 4096          # 4 GB
+    # How many recent runs to keep in-memory for the history chart
+    DB_TEMPDB_HISTORY_SIZE: int = 96                    # 96 × 5 min = 8 hours
 
     # Working Database (Business data, dynamic tables, allocations)
     DATA_DB_NAME: str = "Rep_data"

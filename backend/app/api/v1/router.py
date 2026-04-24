@@ -116,3 +116,7 @@ api_router.include_router(pipeline_router)
 # Allocation Engine v2 (score-based, replaces Excel 8-level waterfall)
 from app.api.v1.endpoints.allocation_engine import router as alloc_engine_router
 api_router.include_router(alloc_engine_router)
+
+# Process Docs (SOPs rendered on the Process page)
+from app.api.v1.endpoints.process_docs import router as process_docs_router
+api_router.include_router(process_docs_router)

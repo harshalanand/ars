@@ -181,12 +181,12 @@ def enable_rcsi():
                 cursor.close()
                 logger.info(f"{label} DB [{db_name}]: RCSI enabled successfully")
             except Exception as e:
-                logger.warning(f"{label} DB [{db_name}]: Could not enable RCSI: {e}")
+                logger.debug(f"{label} DB [{db_name}]: RCSI not set (OK on Azure SQL — usually pre-enabled): {e}")
             finally:
                 raw.close()
 
         except Exception as e:
-            logger.warning(f"{label} DB: RCSI check failed: {e}")
+            logger.debug(f"{label} DB: RCSI check skipped: {e}")
 
 
 # ============================================================================

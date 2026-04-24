@@ -3,7 +3,8 @@ import {
   LayoutDashboard, Table2, Upload, PackageCheck, Users, Shield, Eye, ScrollText,
   ChevronLeft, ChevronRight, Box, ChevronDown, FolderOpen, FilePlus, FileUp, Plus,
   FileDown, Edit3, Settings, Database, Columns, BarChart3, Cpu, Cog, Activity,
-  Clock, Truck, FileText, ClipboardCheck, ShieldCheck, LayoutGrid, Search, TrendingUp, List
+  Clock, Truck, FileText, ClipboardCheck, ShieldCheck, LayoutGrid, Search, TrendingUp, List, BookOpen,
+  HardDrive
 } from 'lucide-react'
 import useAuthStore from '@/store/authStore'
 import clsx from 'clsx'
@@ -12,6 +13,7 @@ import { useState, useRef, useEffect } from 'react'
 const navItems = [
   { label: 'Dashboard', path: '/', icon: LayoutDashboard, end: true },
   { label: 'Allocations', path: '/allocations', icon: PackageCheck, permission: 'ALLOC_READ' },
+  { label: 'Process', path: '/process', icon: BookOpen },
 ]
 
 // Data Management submenu
@@ -60,6 +62,7 @@ const settingsItems = [
   { label: 'Roles', path: '/settings/roles', icon: Shield, permission: 'ADMIN_ROLES_MANAGE' },
   { label: 'Row-Level Security', path: '/settings/rls', icon: Eye, permission: 'ADMIN_RLS_MANAGE' },
   { label: 'Audit Log', path: '/settings/audit', icon: ScrollText, permission: 'ADMIN_AUDIT_READ' },
+  { label: 'TempDB Maintenance', path: '/settings/tempdb', icon: HardDrive, superadminOnly: true },
 ]
 
 function SideLink({ item, collapsed }) {
@@ -82,13 +85,16 @@ function SideLink({ item, collapsed }) {
   )
 }
 
-function SubMenu({ title, icon: Icon, items, collapsed, hasPermission, defaultOpen = true }) {
+function SubMenu({ title, icon: Icon, items, collapsed, hasPermission, isSuperAdmin, defaultOpen = true }) {
   const [open, setOpen] = useState(defaultOpen)
   const [showPopup, setShowPopup] = useState(false)
   const popupRef = useRef()
   const buttonRef = useRef()
-  
-  const visibleItems = items.filter(i => !i.permission || hasPermission(i.permission))
+
+  const visibleItems = items.filter(i => {
+    if (i.superadminOnly && !isSuperAdmin) return false
+    return !i.permission || hasPermission(i.permission)
+  })
   
   if (visibleItems.length === 0) return null
 
@@ -187,7 +193,8 @@ function SubMenu({ title, icon: Icon, items, collapsed, hasPermission, defaultOp
 }
 
 export default function Sidebar({ collapsed, onToggle }) {
-  const { hasPermission } = useAuthStore()
+  const { hasPermission, isSuperAdmin } = useAuthStore()
+  const superadmin = isSuperAdmin()
 
   return (
     <aside className={clsx(
@@ -265,12 +272,13 @@ export default function Sidebar({ collapsed, onToggle }) {
         />
 
         {/* Settings submenu */}
-        <SubMenu 
-          title="Settings" 
-          icon={Settings} 
-          items={settingsItems} 
+        <SubMenu
+          title="Settings"
+          icon={Settings}
+          items={settingsItems}
           collapsed={collapsed}
           hasPermission={hasPermission}
+          isSuperAdmin={superadmin}
           defaultOpen={false}
         />
       </nav>

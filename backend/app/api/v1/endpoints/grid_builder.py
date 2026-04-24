@@ -396,11 +396,11 @@ POST_PIVOT_LOOKUPS = [
         "requires":     ["WERKS"],
         "filter":       {"column": "LISTING", "value": "1"},
     },
-    # 2. Lookup from ARS_CALC_ST_MAJ_CAT (has SAL_D, SAL_PD, CONT — MBQ/OPT_CNT calculated after)
+    # 2. Lookup from ARS_CALC_ST_MAJ_CAT (has ALC_D, SAL_PD, CONT — MBQ/OPT_CNT calculated after)
     #    CONT: ST_MAJ_CAT first, CO_MAJ_CAT fallback (merged during pre-grid calc)
     {
         "lookup_table": "ARS_CALC_ST_MAJ_CAT",
-        "columns":      ["DISP_Q", "DPN", "SAL_D", "SAL_PD", "DISP_GR_DGR", "LW_ACT_SL_GR_DGR", "BGT_SL_GR_DGR", "CONT"],
+        "columns":      ["DISP_Q", "ACS_D", "ALC_D", "DPN", "SAL_D", "SAL_PD", "DISP_GR_DGR", "LW_ACT_SL_GR_DGR", "BGT_SL_GR_DGR", "CONT"],
         "join_on":      {"WERKS": "ST_CD", "MAJ_CAT": "MAJ_CAT"},
         "requires":     ["WERKS", "MAJ_CAT"],
     },
@@ -634,10 +634,10 @@ def _apply_post_lookups(conn, out_table: str, hier_cols: List[str], skip_cont: b
 # ==========================================================================
 # GRID-LEVEL CALCULATIONS (run on output table after lookups)
 # ==========================================================================
-# MBQ     = (SAL_PD * BGT_SL_GR_DGR) * SAL_D + (DISP_Q * DISP_GR_DGR)
+# MBQ     = (SAL_PD * BGT_SL_GR_DGR) * ALC_D + (DISP_Q * DISP_GR_DGR)
 #           Default 1 if BGT_SL_GR_DGR or DISP_GR_DGR is blank/null
 #           Then: MBQ = ROUND(MBQ * CONT, 1)
-# OPT_CNT = ROUND(DISP_Q * CONT / DPN, 1)
+# OPT_CNT = ROUND(DISP_Q * CONT / ACS_D, 1)
 # ==========================================================================
 
 _col_exists_in = column_exists  # shared helper
@@ -651,8 +651,11 @@ def _calculate_grid_columns(conn, out_table: str) -> List[str]:
     """
     warnings = []
 
-    # ── MBQ = (SAL_PD * BGT_SL_GR_DGR) * SAL_D + (DISP_Q * DISP_GR_DGR) ──
-    mbq_required = ["SAL_PD", "SAL_D", "DISP_Q", "DISP_GR_DGR", "BGT_SL_GR_DGR"]
+    # ── MBQ = (SAL_PD * BGT_SL_GR_DGR) * ALC_D + (DISP_Q * DISP_GR_DGR) ──
+    # Support both new (ALC_D/ACS_D) and legacy (SAL_D/DPN) column names
+    _alc_col = "ALC_D" if _col_exists_in(conn, out_table, "ALC_D") else ("SAL_D" if _col_exists_in(conn, out_table, "SAL_D") else "ALC_D")
+    _acs_col = "ACS_D" if _col_exists_in(conn, out_table, "ACS_D") else ("DPN" if _col_exists_in(conn, out_table, "DPN") else "ACS_D")
+    mbq_required = ["SAL_PD", _alc_col, "DISP_Q", "DISP_GR_DGR", "BGT_SL_GR_DGR"]
     mbq_missing = [c for c in mbq_required if not _col_exists_in(conn, out_table, c)]
     if mbq_missing:
         warnings.append(f"MBQ skipped: missing {mbq_missing}")
@@ -661,14 +664,14 @@ def _calculate_grid_columns(conn, out_table: str) -> List[str]:
         try:
             # Step 1: Calculate raw MBQ
             _run(conn, f"""
-                UPDATE [{out_table}] SET [MBQ] =
+                UPDATE [{out_table}] SET [MBQ] = ROUND(
                     (ISNULL(TRY_CAST([SAL_PD] AS FLOAT), 0)
                      * CASE WHEN ISNULL(TRY_CAST([BGT_SL_GR_DGR] AS FLOAT), 0) = 0 THEN 1
                             ELSE TRY_CAST([BGT_SL_GR_DGR] AS FLOAT) END)
-                    * ISNULL(TRY_CAST([SAL_D] AS FLOAT), 0)
+                    * ISNULL(TRY_CAST([{_alc_col}] AS FLOAT), 0)
                     + (ISNULL(TRY_CAST([DISP_Q] AS FLOAT), 0)
                        * CASE WHEN ISNULL(TRY_CAST([DISP_GR_DGR] AS FLOAT), 0) = 0 THEN 1
-                              ELSE TRY_CAST([DISP_GR_DGR] AS FLOAT) END)
+                              ELSE TRY_CAST([DISP_GR_DGR] AS FLOAT) END), 0)
             """)
             # Step 2: MBQ = ROUND(MBQ * CONT, 0) — if CONT is 0 or NULL, MBQ = 0
             if _col_exists_in(conn, out_table, "CONT"):
@@ -682,8 +685,8 @@ def _calculate_grid_columns(conn, out_table: str) -> List[str]:
         except Exception as e:
             warnings.append(f"MBQ error: {str(e)[:150]}")
 
-    # ── OPT_CNT = ROUND(DISP_Q * DISP_GR_DGR * CONT / DPN, 0) ─────────────
-    opt_required = ["DISP_Q", "CONT", "DPN", "DISP_GR_DGR"]
+    # ── OPT_CNT = ROUND(DISP_Q * DISP_GR_DGR * CONT / ACS_D, 0) ─────────────
+    opt_required = ["DISP_Q", "CONT", _acs_col, "DISP_GR_DGR"]
     opt_missing = [c for c in opt_required if not _col_exists_in(conn, out_table, c)]
     if opt_missing:
         warnings.append(f"OPT_CNT skipped: missing {opt_missing}")
@@ -694,17 +697,34 @@ def _calculate_grid_columns(conn, out_table: str) -> List[str]:
                 UPDATE [{out_table}] SET [OPT_CNT] =
                     CASE
                         WHEN ISNULL(TRY_CAST([CONT] AS FLOAT), 0) = 0 THEN 0
-                        WHEN ISNULL(TRY_CAST([DPN] AS FLOAT), 0) = 0 THEN 0
+                        WHEN ISNULL(TRY_CAST([{_acs_col}] AS FLOAT), 0) = 0 THEN 0
                         ELSE ROUND(ISNULL(TRY_CAST([DISP_Q] AS FLOAT), 0)
                                  * CASE WHEN ISNULL(TRY_CAST([DISP_GR_DGR] AS FLOAT), 0) = 0 THEN 1
                                         ELSE TRY_CAST([DISP_GR_DGR] AS FLOAT) END
                                  * TRY_CAST([CONT] AS FLOAT)
-                                 / TRY_CAST([DPN] AS FLOAT), 0)
+                                 / TRY_CAST([{_acs_col}] AS FLOAT), 0)
                     END
             """)
             logger.info(f"OPT_CNT calculated in {out_table}")
         except Exception as e:
             warnings.append(f"OPT_CNT error: {str(e)[:150]}")
+
+    # ── STR = STK_TTL / ([L-7 DAYS SALE-Q] / 7)  (days of stock cover)
+    _sale_q_col = "L-7 DAYS SALE-Q"
+    if _col_exists_in(conn, out_table, "STK_TTL") and _col_exists_in(conn, out_table, _sale_q_col):
+        _ensure_output_col(conn, out_table, "STR")
+        try:
+            _run(conn, f"""
+                UPDATE [{out_table}] SET [STR] =
+                    CASE
+                        WHEN ISNULL(TRY_CAST([{_sale_q_col}] AS FLOAT), 0) / 7.0 <= 0 THEN NULL
+                        ELSE ROUND(ISNULL(TRY_CAST([STK_TTL] AS FLOAT), 0)
+                                 / (TRY_CAST([{_sale_q_col}] AS FLOAT) / 7.0), 0)
+                    END
+            """)
+            logger.info(f"STR calculated in {out_table}")
+        except Exception as e:
+            warnings.append(f"STR error: {str(e)[:150]}")
 
     # ── DISP_Q = DISP_Q * CONT  (effective display qty after contribution)
     # IMPORTANT: must run AFTER MBQ and OPT_CNT since those use the RAW DISP_Q.

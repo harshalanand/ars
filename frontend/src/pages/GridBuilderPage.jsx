@@ -286,7 +286,7 @@ const GridModal = ({ open, onClose, onSave, availableCols, editing, allGrids = [
               ) : (
                 <span style={{ fontSize:10, color:C.textMuted }}>
                   Only ONE grid can be selected for PER_OPT_SALE source.
-                  Formula: ((MBQ − DISP_Q) / DISP_Q × DPN) / SAL_D
+                  Formula: ((MBQ − DISP_Q) / DISP_Q × ACS_D) / ALC_D
                 </span>
               )}
             </Field>

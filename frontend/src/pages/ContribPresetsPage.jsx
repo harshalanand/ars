@@ -14,7 +14,7 @@ export default function ContribPresetsPage() {
   const [presets, setPresets] = useState([])
   const [months, setMonths] = useState([])
   const [loading, setLoading] = useState(false)
-  const [form, setForm] = useState({ preset_name:'', months:[], avg_days:30, kpi_type:'L18M', description:'' })
+  const [form, setForm] = useState({ preset_name:'', months:[], avg_days:30, kpi_type:'L30D', description:'' })
   const [editing, setEditing] = useState(null)
 
   // Memoize normalized months set for fast lookup
@@ -49,7 +49,7 @@ export default function ContribPresetsPage() {
       const validMonths = [...new Set(form.months.map(normMonth))].filter(m => monthsSet.has(m))
       await contribAPI.savePreset({...form, months: validMonths})
       toast.success(`Preset '${form.preset_name}' saved`)
-      setForm({ preset_name:'', months:[], avg_days:30, kpi_type:'L18M', description:'' })
+      setForm({ preset_name:'', months:[], avg_days:30, kpi_type:'L30D', description:'' })
       setEditing(null)
       loadPresets()
     } catch (e) { toast.error(e.response?.data?.detail || 'Save failed') }
@@ -107,6 +107,7 @@ export default function ContribPresetsPage() {
               <label style={{ fontSize:11, fontWeight:700, color:C.textSub, textTransform:'uppercase' }}>KPI Type</label>
               <select value={form.kpi_type} onChange={e => setForm(f=>({...f, kpi_type:e.target.value}))}
                 style={{ width:'100%', padding:'8px 12px', borderRadius:8, border:`1px solid ${C.inputBorder}`, background:C.inputBg, color:C.text, fontSize:13, boxSizing:'border-box' }}>
+                <option value="L30D">L30D</option>
                 <option value="L18M">L18M</option>
                 <option value="L7D">L7D</option>
               </select>
@@ -140,7 +141,7 @@ export default function ContribPresetsPage() {
               padding:'10px', borderRadius:8, fontSize:13, fontWeight:700, border:'none', cursor:'pointer',
               background:C.primary, color:'#fff',
             }}><Save size={14}/> {editing ? 'Update' : 'Save'}</button>
-            {editing && <button onClick={() => { setEditing(null); setForm({ preset_name:'', months:[], avg_days:30, kpi_type:'L18M', description:'' }) }}
+            {editing && <button onClick={() => { setEditing(null); setForm({ preset_name:'', months:[], avg_days:30, kpi_type:'L30D', description:'' }) }}
               style={{ padding:'10px 16px', borderRadius:8, fontSize:13, fontWeight:700, border:`1px solid ${C.cardBorder}`, background:'#fff', color:C.textSub, cursor:'pointer' }}>Cancel</button>}
           </div>
         </div>

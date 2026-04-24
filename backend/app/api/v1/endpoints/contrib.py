@@ -60,7 +60,7 @@ class PresetPayload(BaseModel):
     preset_name: str
     months: List[str] = []
     avg_days: int = 30
-    kpi_type: str = "L18M"           # L18M or L7D
+    kpi_type: str = "L30D"           # L18M, L30D or L7D
     description: str = ""
 
 class PresetReorder(BaseModel):
@@ -127,6 +127,15 @@ def _ensure_preset_table(engine):
         r = c.execute(text(f"SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='{PRESET_TABLE}' AND COLUMN_NAME='sequence_order'")).fetchone()
         if not r:
             _run(c, f"ALTER TABLE {PRESET_TABLE} ADD sequence_order INT DEFAULT 9999")
+        # seed default L30D preset if absent
+        exists = c.execute(text(f"SELECT 1 FROM {PRESET_TABLE} WHERE preset_name = 'L30D'")).fetchone()
+        if not exists:
+            cfg = json.dumps({"months": [], "avg_days": 30, "kpi_type": "L30D"})
+            c.execute(text(
+                f"INSERT INTO {PRESET_TABLE}(preset_name,preset_type,description,config_json,sequence_order) "
+                f"VALUES(:n,:t,:d,:cfg,:s)"
+            ), {"n": "L30D", "t": "L30D", "d": "Last 30 days", "cfg": cfg, "s": 0})
+            c.commit()
 
 def _ensure_mapping_table(engine):
     with engine.connect() as c:
@@ -287,7 +296,7 @@ def get_available_months(current_user: User = Depends(get_current_user)):
     engine = get_data_engine()
     df = _read_sql_nolock("""
         SELECT DISTINCT STOCK_DATE FROM dbo.COUNT_STOCK_DATA_18M WITH (NOLOCK)
-        WHERE COALESCE(KPI,'') <> 'L7D' ORDER BY STOCK_DATE DESC
+        WHERE COALESCE(KPI,'') NOT IN ('L7D','L30D') ORDER BY STOCK_DATE DESC
     """, engine)
     df['STOCK_DATE'] = pd.to_datetime(df['STOCK_DATE'])
     months = sorted([str(m) for m in df['STOCK_DATE'].dt.date.unique()], reverse=True)
@@ -326,7 +335,7 @@ def list_presets(current_user: User = Depends(get_current_user)):
         presets.append({
             "preset_name": r[0], "preset_type": r[1], "description": r[2],
             "months": cfg.get("months", []), "avg_days": cfg.get("avg_days", 30),
-            "kpi_type": cfg.get("kpi_type", "L18M"), "sequence_order": r[4],
+            "kpi_type": cfg.get("kpi_type", "L30D"), "sequence_order": r[4],
         })
     return APIResponse(success=True, data={"presets": presets, "total": len(presets)})
 
@@ -549,11 +558,13 @@ def _process_single_preset(engine, preset_name, preset_cfg, majcats, grouping_co
     where_clause = " AND ".join(where_parts) if where_parts else "1=1"
 
     months = preset_cfg.get("months", [])
-    kpi_type = preset_cfg.get("kpi_type", "L18M")
+    kpi_type = preset_cfg.get("kpi_type", "L30D")
     avg_days = preset_cfg.get("avg_days", 30)
 
     if kpi_type == "L7D" or preset_name == "L7D":
         date_filter = "sal_stk.KPI = 'L7D'"
+    elif kpi_type == "L30D" or preset_name == "L30D":
+        date_filter = "sal_stk.KPI = 'L30D'"
     else:
         ms = "','".join(months)
         date_filter = f"sal_stk.STOCK_DATE IN ('{ms}') AND sal_stk.KPI = 'L18M'"

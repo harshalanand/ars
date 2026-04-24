@@ -2,7 +2,9 @@
 TempDB Cleanup Service
 ======================
 Background daemon thread that periodically drops orphaned ARS global (##) temp
-tables from SQL Server tempdb and shrinks tempdb data files.
+tables from SQL Server tempdb, shrinks tempdb data files, and (when size
+exceeds a configured threshold) runs an aggressive reclaim: cache flush +
+hard SHRINKFILE to a target size.
 
 Mirrors the AuditQueue threading pattern in audit_service.py.
 
@@ -13,8 +15,9 @@ Usage (called automatically from main.py lifespan):
 """
 import threading
 import time
+from collections import deque
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Deque, Dict, List, Optional
 
 from loguru import logger
 
@@ -58,14 +61,39 @@ _TEMPDB_SIZE_SQL = """
     WHERE type_desc = 'ROWS';
 """
 
+_TOP_SESSIONS_SQL = """
+    SELECT TOP 10
+        s.session_id,
+        ISNULL(r.status, 'sleeping')                              AS status,
+        ISNULL(s.login_name, '')                                  AS login_name,
+        ISNULL(s.host_name, '')                                   AS host_name,
+        ISNULL(s.program_name, '')                                AS program_name,
+        (ssu.user_objects_alloc_page_count
+           + ssu.internal_objects_alloc_page_count) * 8 / 1024    AS mb_used,
+        ssu.user_objects_alloc_page_count  * 8 / 1024             AS user_mb,
+        ssu.internal_objects_alloc_page_count * 8 / 1024          AS internal_mb,
+        s.last_request_start_time                                 AS last_request_start
+    FROM sys.dm_db_session_space_usage ssu
+    INNER JOIN sys.dm_exec_sessions s ON ssu.session_id = s.session_id
+    LEFT  JOIN sys.dm_exec_requests  r ON s.session_id  = r.session_id
+    WHERE ssu.session_id > 50
+      AND (ssu.user_objects_alloc_page_count + ssu.internal_objects_alloc_page_count) > 0
+    ORDER BY mb_used DESC;
+"""
+
 
 class TempDBCleanupService:
     """
     Daemon thread that wakes every `interval_minutes` and:
       1. Drops orphaned ARS ## global temp tables older than `orphan_age_minutes`.
       2. Runs DBCC SHRINKFILE TRUNCATEONLY on every tempdb data file.
+      3. If total size exceeds `aggressive_threshold_mb`, runs aggressive reclaim
+         (FREEPROCCACHE + FREESYSTEMCACHE + SHRINKFILE to `aggressive_target_mb`).
+      4. If total size exceeds `alert_threshold_mb`, raises an ALERT (ERROR log
+         + stored in `self._last_alert` so the UI can surface it).
+      5. Keeps a short in-memory history of recent runs for the UI trend chart.
 
-    Thread-safe. Exposes run_now() for the API endpoint manual trigger.
+    Thread-safe. Exposes run_now() and aggressive_shrink_now() for API endpoints.
     """
 
     def __init__(
@@ -73,15 +101,25 @@ class TempDBCleanupService:
         interval_minutes: int = 5,
         orphan_age_minutes: int = 10,
         shrink_after_cleanup: bool = True,
+        aggressive_threshold_mb: int = 20480,
+        alert_threshold_mb: int = 40960,
+        aggressive_target_mb: int = 4096,
+        history_size: int = 96,
     ) -> None:
         self._interval = interval_minutes * 60   # stored as seconds
         self._orphan_age = orphan_age_minutes
         self._shrink = shrink_after_cleanup
+        self._aggressive_threshold_mb = aggressive_threshold_mb
+        self._alert_threshold_mb = alert_threshold_mb
+        self._aggressive_target_mb = aggressive_target_mb
+
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
         self._last_run: Optional[datetime] = None
         self._last_stats: Dict[str, Any] = {}
+        self._last_alert: Optional[Dict[str, Any]] = None
+        self._history: Deque[Dict[str, Any]] = deque(maxlen=history_size)
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -99,7 +137,9 @@ class TempDBCleanupService:
             f"TempDB cleanup service started — "
             f"interval={self._interval // 60} min, "
             f"orphan_age={self._orphan_age} min, "
-            f"shrink={self._shrink}"
+            f"shrink={self._shrink}, "
+            f"aggressive_threshold={self._aggressive_threshold_mb} MB, "
+            f"alert_threshold={self._alert_threshold_mb} MB"
         )
 
     def stop(self) -> None:
@@ -112,10 +152,38 @@ class TempDBCleanupService:
 
     def run_now(self, dry_run: bool = False) -> Dict[str, Any]:
         """
-        Blocking manual trigger — used by the maintenance API endpoint.
+        Blocking manual trigger — standard cleanup cycle.
         Returns the stats dict from _do_cleanup().
         """
         return self._do_cleanup(dry_run=dry_run)
+
+    def aggressive_shrink_now(self) -> Dict[str, Any]:
+        """
+        Blocking manual trigger — force an aggressive shrink regardless of size.
+        Drops orphans, flushes caches, hard-shrinks every data file to the
+        configured target size.
+        """
+        return self._do_cleanup(dry_run=False, force_aggressive=True)
+
+    def top_sessions(self) -> List[Dict[str, Any]]:
+        """Return the top tempdb-consuming sessions for diagnostics."""
+        engine = get_data_engine()
+        raw_conn = engine.raw_connection()
+        try:
+            cursor = raw_conn.cursor()
+            cursor.execute(_TOP_SESSIONS_SQL)
+            cols = [c[0] for c in cursor.description]
+            rows = [dict(zip(cols, row)) for row in cursor.fetchall()]
+            for r in rows:
+                if r.get("last_request_start"):
+                    r["last_request_start"] = r["last_request_start"].isoformat()
+            return rows
+        finally:
+            raw_conn.close()
+
+    def clear_alert(self) -> None:
+        """Dismiss the current alert (called from the UI)."""
+        self._last_alert = None
 
     @property
     def status(self) -> Dict[str, Any]:
@@ -125,9 +193,19 @@ class TempDBCleanupService:
             "interval_minutes": self._interval // 60,
             "orphan_age_minutes": self._orphan_age,
             "shrink_enabled": self._shrink,
+            "aggressive_threshold_mb": self._aggressive_threshold_mb,
+            "alert_threshold_mb": self._alert_threshold_mb,
+            "aggressive_target_mb": self._aggressive_target_mb,
             "last_run": self._last_run.isoformat() if self._last_run else None,
             "last_stats": self._last_stats,
+            "last_alert": self._last_alert,
+            "history_points": len(self._history),
         }
+
+    @property
+    def history(self) -> List[Dict[str, Any]]:
+        """Recent runs (for the UI trend chart)."""
+        return list(self._history)
 
     # ── Internal ──────────────────────────────────────────────────────────────
 
@@ -150,13 +228,30 @@ class TempDBCleanupService:
             time.sleep(min(5, seconds - elapsed))
             elapsed += 5
 
-    def _do_cleanup(self, dry_run: bool = False) -> Dict[str, Any]:
+    def _read_size(self, cursor) -> Optional[float]:
+        """Fetch current tempdb allocated MB, or None on failure."""
+        try:
+            cursor.execute(_TEMPDB_SIZE_SQL)
+            row = cursor.fetchone()
+            if row and row[0] is not None:
+                return round(float(row[0]), 2)
+        except Exception as exc:
+            logger.debug(f"TempDB size read failed: {exc}")
+        return None
+
+    def _do_cleanup(
+        self,
+        dry_run: bool = False,
+        force_aggressive: bool = False,
+    ) -> Dict[str, Any]:
         """
         Core logic:
           1. Snapshot tempdb size.
           2. Find + drop orphaned ARS ## tables older than orphan_age_minutes.
           3. SHRINKFILE TRUNCATEONLY on every tempdb data file.
-          4. Snapshot tempdb size again and return stats.
+          4. If size > aggressive threshold (or force_aggressive): flush caches
+             and hard-shrink every data file to aggressive_target_mb.
+          5. Snapshot tempdb size again and record history + optional alert.
         """
         dropped: List[Dict[str, Any]] = []
         skipped: List[Dict[str, Any]] = []
@@ -164,6 +259,7 @@ class TempDBCleanupService:
         errors:  List[Dict[str, Any]] = []
         mb_before: Optional[float] = None
         mb_after:  Optional[float] = None
+        mode = "light"   # light | aggressive | dry_run
 
         engine = get_data_engine()
         raw_conn = engine.raw_connection()
@@ -171,13 +267,7 @@ class TempDBCleanupService:
             cursor = raw_conn.cursor()
 
             # 1. Size before
-            try:
-                cursor.execute(_TEMPDB_SIZE_SQL)
-                row = cursor.fetchone()
-                if row and row[0] is not None:
-                    mb_before = round(float(row[0]), 2)
-            except Exception as exc:
-                logger.debug(f"TempDB size (before) failed: {exc}")
+            mb_before = self._read_size(cursor)
 
             # 2. Find orphans
             cursor.execute(_FIND_ORPHANS_SQL, self._orphan_age)
@@ -207,10 +297,20 @@ class TempDBCleanupService:
                     errors.append({"table": tbl_name, "error": str(exc)})
                     logger.warning(f"TempDB cleanup: failed to drop [{tbl_name}]: {exc}")
 
-            # 3. Shrink (always attempt — TRUNCATEONLY is a no-op if nothing to free)
-            # DBCC SHRINKFILE requires:
+            # Decide shrink mode
+            size_for_decision = mb_before if mb_before is not None else 0.0
+            aggressive = force_aggressive or (
+                size_for_decision >= self._aggressive_threshold_mb
+            )
+            if dry_run:
+                mode = "dry_run"
+            else:
+                mode = "aggressive" if aggressive else "light"
+
+            # 3 + 4. Shrink
+            # DBCC SHRINKFILE / FREEPROCCACHE require:
             #   a) autocommit mode (cannot run inside a user transaction)
-            #   b) tempdb as the current database context
+            #   b) tempdb as current database context for SHRINKFILE
             # So we use a separate pyodbc connection with autocommit + USE tempdb.
             if self._shrink and not dry_run:
                 shrink_fairy = None
@@ -222,13 +322,35 @@ class TempDBCleanupService:
                     pyodbc_conn = shrink_fairy.driver_connection
                     pyodbc_conn.autocommit = True
                     shrink_cursor = pyodbc_conn.cursor()
-                    shrink_cursor.execute("USE tempdb")
 
+                    if aggressive:
+                        # Flush caches so SHRINKFILE has room to reclaim.
+                        # These run in the master context; SHRINKFILE needs tempdb.
+                        for stmt in (
+                            "DBCC FREEPROCCACHE WITH NO_INFOMSGS",
+                            "DBCC FREESYSTEMCACHE ('ALL') WITH NO_INFOMSGS",
+                            "DBCC FREESESSIONCACHE WITH NO_INFOMSGS",
+                        ):
+                            try:
+                                shrink_cursor.execute(stmt)
+                            except Exception as exc:
+                                errors.append({"step": stmt, "error": str(exc)})
+                                logger.warning(f"TempDB aggressive cache flush failed [{stmt}]: {exc}")
+
+                    shrink_cursor.execute("USE tempdb")
                     for fname in file_names:
                         try:
-                            shrink_cursor.execute(
-                                f"DBCC SHRINKFILE ([{fname}], TRUNCATEONLY) WITH NO_INFOMSGS"
-                            )
+                            if aggressive:
+                                stmt = (
+                                    f"DBCC SHRINKFILE ([{fname}], "
+                                    f"{int(self._aggressive_target_mb)}) WITH NO_INFOMSGS"
+                                )
+                            else:
+                                stmt = (
+                                    f"DBCC SHRINKFILE ([{fname}], TRUNCATEONLY) "
+                                    f"WITH NO_INFOMSGS"
+                                )
+                            shrink_cursor.execute(stmt)
                             shrunk.append(fname)
                         except Exception as exc:
                             errors.append({"file": fname, "error": str(exc)})
@@ -247,21 +369,20 @@ class TempDBCleanupService:
                         except Exception:
                             pass
 
-            # 4. Size after
-            try:
-                cursor.execute(_TEMPDB_SIZE_SQL)
-                row = cursor.fetchone()
-                if row and row[0] is not None:
-                    mb_after = round(float(row[0]), 2)
-            except Exception as exc:
-                logger.debug(f"TempDB size (after) failed: {exc}")
+            # 5. Size after
+            mb_after = self._read_size(cursor)
 
         finally:
             raw_conn.close()
 
-        mb_freed = round((mb_before or 0.0) - (mb_after if mb_after is not None else (mb_before or 0.0)), 2)
+        mb_freed = round(
+            (mb_before or 0.0) - (mb_after if mb_after is not None else (mb_before or 0.0)),
+            2,
+        )
+
         stats: Dict[str, Any] = {
             "run_at":            datetime.utcnow().isoformat(),
+            "mode":              mode,
             "dry_run":           dry_run,
             "dropped_count":     len(dropped),
             "dropped":           dropped,
@@ -276,10 +397,39 @@ class TempDBCleanupService:
         self._last_run = datetime.utcnow()
         self._last_stats = stats
 
-        if dropped or errors:
+        # Append a compact point to history (enough for the trend chart).
+        self._history.append({
+            "ts":       stats["run_at"],
+            "mode":     mode,
+            "mb_before": mb_before,
+            "mb_after":  mb_after,
+            "mb_freed":  mb_freed,
+            "dropped":   len(dropped),
+        })
+
+        # Alert: size still above the alert threshold after cleanup.
+        current = mb_after if mb_after is not None else mb_before
+        if current is not None and current >= self._alert_threshold_mb:
+            self._last_alert = {
+                "raised_at": stats["run_at"],
+                "mb_current": current,
+                "threshold_mb": self._alert_threshold_mb,
+                "message": (
+                    f"TempDB is {current:.0f} MB — above alert threshold "
+                    f"{self._alert_threshold_mb} MB. "
+                    f"Last cleanup mode={mode}, freed={mb_freed} MB."
+                ),
+            }
+            logger.error(f"ALERT: {self._last_alert['message']}")
+        elif self._last_alert and current is not None and current < self._alert_threshold_mb:
+            # Auto-clear once we drop back below threshold
+            self._last_alert = None
+
+        if dropped or errors or mode == "aggressive":
             logger.info(
-                f"TempDB cleanup done — dropped={len(dropped)}, "
-                f"errors={len(errors)}, freed={mb_freed} MB"
+                f"TempDB cleanup done — mode={mode}, dropped={len(dropped)}, "
+                f"errors={len(errors)}, freed={mb_freed} MB, "
+                f"size {mb_before} → {mb_after} MB"
             )
 
         return stats
@@ -287,7 +437,11 @@ class TempDBCleanupService:
 
 # ── Module-level singleton ────────────────────────────────────────────────────
 tempdb_cleaner = TempDBCleanupService(
-    interval_minutes   = settings.DB_TEMPDB_CLEANUP_INTERVAL_MINUTES,
-    orphan_age_minutes = settings.DB_TEMPDB_ORPHAN_AGE_MINUTES,
-    shrink_after_cleanup = True,
+    interval_minutes        = settings.DB_TEMPDB_CLEANUP_INTERVAL_MINUTES,
+    orphan_age_minutes      = settings.DB_TEMPDB_ORPHAN_AGE_MINUTES,
+    shrink_after_cleanup    = True,
+    aggressive_threshold_mb = settings.DB_TEMPDB_AGGRESSIVE_THRESHOLD_MB,
+    alert_threshold_mb      = settings.DB_TEMPDB_ALERT_THRESHOLD_MB,
+    aggressive_target_mb    = settings.DB_TEMPDB_AGGRESSIVE_TARGET_MB,
+    history_size            = settings.DB_TEMPDB_HISTORY_SIZE,
 )

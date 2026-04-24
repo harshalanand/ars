@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"from app.services.upsert_engine import UpsertEngine; print\\('upsert_engine: OK'\\)\")",
+      "Bash(python -c \"from app.services.upload_job_service import get_job_status; print\\('upload_job_service: OK'\\)\")",
+      "Bash(python -c \"from app.services.tempdb_cleanup_service import tempdb_cleaner; print\\('tempdb_cleanup: OK'\\)\")",
+      "Bash(python -c ':*)"
+    ]
+  }
+}

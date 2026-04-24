@@ -1184,13 +1184,26 @@ export default function MSAStockCalculationPage() {
                       <p className="text-[10px] text-gray-500 mt-1">records processed</p>
                     </div>
                   )}
-                  {calculationResults.msa_gen_clr && calculationResults.msa_gen_clr.length > 0 && (
-                    <div className="p-3 bg-white rounded-lg border border-blue-200">
-                      <div className="text-[10px] font-semibold text-gray-600 uppercase">Generated Articles</div>
-                      <div className="text-[16px] font-bold text-blue-600 mt-1">{calculationResults.msa_gen_clr.length}</div>
-                      <p className="text-[10px] text-gray-500 mt-1">generated article records</p>
-                    </div>
-                  )}
+                  {calculationResults.msa_gen_clr && calculationResults.msa_gen_clr.length > 0 && (() => {
+                    const rows = calculationResults.msa_gen_clr;
+                    const optCount = new Set(rows.map(r =>
+                      `${r.MAJ_CAT ?? r.maj_cat ?? ''}|${r.GEN_ART_NUMBER ?? r.gen_art_number ?? ''}|${r.CLR ?? r.clr ?? ''}`
+                    )).size;
+                    const qtySum = rows.reduce((s, r) => s + (parseFloat(r.FNL_Q ?? r.fnl_q ?? 0) || 0), 0);
+                    return (
+                      <div className="p-3 bg-white rounded-lg border border-blue-200">
+                        <div className="text-[10px] font-semibold text-gray-600 uppercase">Generated Articles (ARS_MSA_GEN_ART)</div>
+                        <div className="text-[16px] font-bold text-blue-600 mt-1">
+                          {optCount.toLocaleString()} <span className="text-[10px] font-normal text-gray-500">OPTs</span>
+                          <span className="mx-2 text-gray-300">·</span>
+                          {Math.round(qtySum).toLocaleString()} <span className="text-[10px] font-normal text-gray-500">qty</span>
+                        </div>
+                        <p className="text-[10px] text-gray-500 mt-1">
+                          {rows.length.toLocaleString()} rows · distinct MAJ+GEN+CLR · Σ FNL_Q
+                        </p>
+                      </div>
+                    );
+                  })()}
                   {calculationResults.msa_gen_clr_var && calculationResults.msa_gen_clr_var.length > 0 && (
                     <div className="p-3 bg-white rounded-lg border border-purple-200">
                       <div className="text-[10px] font-semibold text-gray-600 uppercase">Variant Articles</div>
